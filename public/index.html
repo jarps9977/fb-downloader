@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Facebook Video Downloader Pro</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Facebook Video Downloader</h1>
+    <span class="badge-pro">PRO</span>
+  </div>
+  <p class="subtitle">รองรับ SD / HD / 1080p / 4K — สำหรับวิดีโอของตัวเองเท่านั้น</p>
+
+  <!-- TAB -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('url')">🔗 วาง URL อัตโนมัติ</button>
+    <button class="tab-btn" onclick="switchTab('paste')">📋 Paste Source (Private)</button>
+  </div>
+
+  <!-- TAB: URL -->
+  <div id="tab-url">
+    <div class="card">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-title">วาง Facebook URL ของวิดีโอ</div>
+        <input type="text" id="url-input" placeholder="https://www.facebook.com/watch?v=..." />
+        <div class="info-box" style="margin-top:10px;">
+          ⚠️ วิธีนี้ใช้ได้กับวิดีโอ <strong>สาธารณะ (Public)</strong> หรือวิดีโอที่ login แล้วสามารถดูได้<br>
+          หากเป็น Private ให้ใช้แท็บ <strong>"Paste Source"</strong> แทน
+        </div>
+        <div class="btn-row" style="margin-top:12px;">
+          <button class="btn-primary" id="url-btn" onclick="fetchFromUrl()">ดึงข้อมูลวิดีโอ</button>
+        </div>
+        <div id="url-error" class="err"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: PASTE -->
+  <div id="tab-paste" style="display:none;">
+    <div class="card">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-title">เปิด Facebook แล้ว login → ไปที่หน้าวิดีโอของคุณโดยตรง</div>
+        <div class="info-box">
+          กด <kbd>Ctrl</kbd>+<kbd>U</kbd> (Windows) หรือ <kbd>⌘</kbd>+<kbd>Option</kbd>+<kbd>U</kbd> (Mac)<br>
+          จากนั้นกด <kbd>Ctrl</kbd>+<kbd>A</kbd> → <kbd>Ctrl</kbd>+<kbd>C</kbd> เพื่อ copy source ทั้งหมด
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <div class="step-title">Paste Page Source ที่นี่</div>
+        <textarea id="source-input" placeholder="วาง HTML source code ของ Facebook ที่นี่..."></textarea>
+        <div class="btn-row">
+          <button class="btn-primary" id="parse-btn" onclick="parseFromSource()">ค้นหาวิดีโอ</button>
+          <button class="btn-secondary" onclick="clearAll()">ล้าง</button>
+        </div>
+        <div id="paste-error" class="err"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="card" id="results-section" style="display:none;">
+    <div class="step-num">✓</div>
+    <div class="step-body">
+      <div class="step-title">เลือก quality และ download</div>
+      <div id="results-list"></div>
+      <p class="note">
+        * DASH streams (1080p/4K) ใช้ ffmpeg merge ฝั่ง server — ใช้เวลาสักครู่<br>
+        * SD/HD จะ download ผ่าน proxy server อัตโนมัติ
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- LOADING -->
+<div id="loading-overlay" style="display:none;">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <p id="loading-text">กำลังประมวลผล...</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

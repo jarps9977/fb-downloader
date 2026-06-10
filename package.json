@@ -1,0 +1,20 @@
+{
+  "name": "fb-downloader-pro",
+  "version": "1.0.0",
+  "description": "Facebook Video Downloader Pro",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.17.0",
+    "express": "^5.2.1",
+    "xml2js": "^0.6.2"
+  }
+}
