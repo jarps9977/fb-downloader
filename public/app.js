@@ -16,15 +16,16 @@ async function analyzeUrl(event) {
     return;
   }
 
-  if (!url.match(/^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch)\//i)) {
-    errorEl.textContent = 'URL ต้องเป็น Facebook หรือ fb.watch เท่านั้น';
+  if (!url.match(/^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com)\//i)) {
+    errorEl.textContent = 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น';
     return;
   }
 
   pendingSourceUrl = url;
+  updateViewSourceLink(url);
   button.disabled = true;
   button.textContent = 'กำลังค้นหา...';
-  showLoading('กำลังดึงข้อมูลจาก Facebook...');
+  showLoading('กำลังดึงข้อมูล...');
 
   try {
     var resp = await fetch('/api/analyze', {
@@ -53,19 +54,36 @@ async function analyzeUrl(event) {
 
 function showSourceFallback(url) {
   pendingSourceUrl = url;
-  var viewSourceUrl = 'view-source:' + url;
+  updateViewSourceLink(url);
   var panel = document.getElementById('source-fallback');
-  var link = document.getElementById('view-source-link');
-  link.href = viewSourceUrl;
-  link.textContent = viewSourceUrl;
   document.getElementById('source-input').value = '';
   panel.hidden = false;
   document.getElementById('source-status').textContent = '';
 }
 
 function hideSourceFallback() {
-  document.getElementById('source-fallback').hidden = true;
   document.getElementById('source-status').textContent = '';
+}
+
+function updateViewSourceLinkFromInput() {
+  updateViewSourceLink(document.getElementById('url-input').value.trim());
+}
+
+function updateViewSourceLink(url) {
+  var link = document.getElementById('view-source-link');
+  if (!link) return;
+
+  if (!url) {
+    link.href = '#';
+    link.textContent = 'วาง URL ด้านบนเพื่อสร้าง View Source link';
+    pendingSourceUrl = '';
+    return;
+  }
+
+  var viewSourceUrl = 'view-source:' + url;
+  link.href = viewSourceUrl;
+  link.textContent = viewSourceUrl;
+  pendingSourceUrl = url;
 }
 
 async function importSourceFromClipboard() {
@@ -134,13 +152,27 @@ async function parseSourceInBackground(source, statusEl) {
 
   var data = await resp.json();
   if (!resp.ok) {
-    statusEl.textContent = data.error || 'source นี้ยังไม่พบวิดีโอ';
+    statusEl.textContent = formatParseError(data);
     return;
   }
 
   currentStreams = uniqueQualityStreams(data.streams || []);
   hideSourceFallback();
   renderResults(currentStreams);
+}
+
+function formatParseError(data) {
+  if (!data || !data.diagnostics) return data?.error || 'source นี้ยังไม่พบวิดีโอ';
+
+  var counts = data.diagnostics.counts || {};
+  var important = [
+    'manifest_xml: ' + (counts.manifest_xml || 0),
+    'dash_manifest: ' + (counts.dash_manifest || 0),
+    '.mp4: ' + (counts['.mp4'] || 0),
+    'playable_url: ' + (counts.playable_url || 0)
+  ].join(', ');
+
+  return (data.error || 'source นี้ยังไม่พบวิดีโอ') + ' | ' + data.diagnostics.hint + ' | ' + important;
 }
 
 function uniqueQualityStreams(streams) {
@@ -318,6 +350,8 @@ function resetResults(clearInput) {
   if (clearInput !== false) {
     document.getElementById('url-input').value = '';
     document.getElementById('error').textContent = '';
+    document.getElementById('source-input').value = '';
+    updateViewSourceLink('');
     hideSourceFallback();
   }
 }

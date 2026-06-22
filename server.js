@@ -43,16 +43,22 @@ function loadLocalEnv() {
   }
 }
 
-function validateFacebookUrl(url) {
-  return /^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch)\//i.test(url || '');
+function validateSupportedUrl(url) {
+  return /^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com)\//i.test(url || '');
 }
 
-function buildFacebookCandidates(url) {
+function buildSourceCandidates(url) {
   const candidates = [url];
   try {
     const parsed = new URL(url);
     if (/facebook\.com$/i.test(parsed.hostname)) {
       for (const host of ['www.facebook.com', 'm.facebook.com', 'mbasic.facebook.com']) {
+        const clone = new URL(parsed.toString());
+        clone.hostname = host;
+        candidates.push(clone.toString());
+      }
+    } else if (/instagram\.com$/i.test(parsed.hostname)) {
+      for (const host of ['www.instagram.com', 'm.instagram.com']) {
         const clone = new URL(parsed.toString());
         clone.hostname = host;
         candidates.push(clone.toString());
@@ -64,7 +70,7 @@ function buildFacebookCandidates(url) {
 }
 
 function isLoginRedirect(finalUrl) {
-  return /facebook\.com\/login/i.test(finalUrl || '');
+  return /(facebook|instagram)\.com\/(login|accounts\/login)/i.test(finalUrl || '');
 }
 
 function decodeFacebookValue(value) {
@@ -88,8 +94,11 @@ function normalizeVideoUrl(url) {
     .replace(/\s/g, '');
 }
 
-async function fetchFacebookSource(url, cookies) {
+async function fetchRemoteSource(url, cookies) {
   const headers = { ...FB_HEADERS };
+  if (/instagram\.com/i.test(url)) {
+    headers.Referer = 'https://www.instagram.com/';
+  }
   if (cookies) headers.Cookie = cookies;
 
   const resp = await axios.get(url, {
@@ -134,6 +143,21 @@ async function getStreamsFromSource(source) {
   extractByKey('browser_native_hd_url', 'HD 720p', 720);
   extractByKey('playable_url', 'SD 480p', 480);
   extractByKey('browser_native_sd_url', 'SD 480p', 480);
+  extractByKey('video_url', 'Video', 720);
+  extractByKey('video_dash_manifest', 'Video', 720);
+
+  const instagramVideoPatterns = [
+    /"video_url"\s*:\s*"((?:\\.|[^"\\]){10,})"/g,
+    /\\"video_url\\"\s*:\s*\\"((?:\\.|[^"\\]){10,})\\"/g,
+    /"src"\s*:\s*"((?:\\.|[^"\\]){10,}\.mp4(?:\\.|[^"\\])*)"/g,
+  ];
+
+  for (const pattern of instagramVideoPatterns) {
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      addUrl(match[1], 'Instagram Video', 720, false);
+    }
+  }
 
   const dashPatterns = [
     /"manifest_xml"\s*:\s*"((?:\\.|[^"\\]){50,})"/g,
@@ -163,7 +187,7 @@ async function getStreamsFromSource(source) {
   let mp4Match;
   while ((mp4Match = mp4Pattern.exec(source)) !== null) {
     const url = normalizeVideoUrl(mp4Match[1]);
-    if (/fbcdn|facebook|video/i.test(url)) {
+    if (/fbcdn|facebook|instagram|cdninstagram|video/i.test(url)) {
       addUrl(url, 'Auto MP4', 360, false);
     }
   }
@@ -175,15 +199,15 @@ app.post('/api/analyze', async (req, res) => {
   const { url } = req.body;
   const cookies = req.body.cookies || process.env.FB_COOKIE || '';
   if (!url) return res.status(400).json({ error: 'กรุณาใส่ URL' });
-  if (!validateFacebookUrl(url)) {
-    return res.status(400).json({ error: 'URL ต้องเป็น Facebook หรือ fb.watch เท่านั้น' });
+  if (!validateSupportedUrl(url)) {
+    return res.status(400).json({ error: 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น' });
   }
 
   const attempts = [];
 
   try {
-    for (const candidateUrl of buildFacebookCandidates(url)) {
-      const fetched = await fetchFacebookSource(candidateUrl, cookies);
+    for (const candidateUrl of buildSourceCandidates(url)) {
+      const fetched = await fetchRemoteSource(candidateUrl, cookies);
       const streams = isLoginRedirect(fetched.finalUrl) ? [] : await getStreamsFromSource(fetched.source);
       attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length });
 
@@ -201,7 +225,7 @@ app.post('/api/analyze', async (req, res) => {
   } catch (err) {
     const status = err.response?.status;
     res.status(500).json({
-      error: `ดึงข้อมูลจาก Facebook ไม่สำเร็จ${status ? ` (${status})` : ''}: ${err.message}`,
+      error: `ดึงข้อมูลไม่สำเร็จ${status ? ` (${status})` : ''}: ${err.message}`,
     });
   }
 });
@@ -212,11 +236,41 @@ app.post('/api/parse', async (req, res) => {
 
   const streams = await getStreamsFromSource(source);
   if (streams.length === 0) {
-    return res.status(404).json({ error: 'ไม่พบ video URL' });
+    return res.status(404).json({
+      error: 'ไม่พบ video URL ใน source นี้',
+      diagnostics: analyzeSourceDiagnostics(source),
+    });
   }
 
   res.json({ streams });
 });
+
+function analyzeSourceDiagnostics(source) {
+  const terms = [
+    'manifest_xml',
+    'dash_manifests',
+    'dash_manifest',
+    'FBQualityLabel',
+    'BaseURL',
+    'playable_url',
+    'browser_native',
+    '.mp4',
+    'video',
+  ];
+
+  const counts = {};
+  for (const term of terms) {
+    counts[term] = (source.match(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')) || []).length;
+  }
+
+  return {
+    length: source.length,
+    counts,
+    hint: counts.manifest_xml || counts.dash_manifest || counts['.mp4']
+      ? 'source มีคำเกี่ยวกับวิดีโอ แต่ parser ยังอ่านรูปแบบนี้ไม่ออก'
+      : 'source นี้น่าจะเป็น DOM shell จาก iOS Shortcut ยังไม่มี payload วิดีโอ ให้ลอง copy จาก Network response ที่มี manifest_xml หรือ .mp4',
+  };
+}
 
 async function parseDash(xml) {
   const regexStreams = parseDashWithRegex(xml);

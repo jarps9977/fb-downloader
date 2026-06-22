@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Facebook Video Downloader Pro</title>
+<title>Story Video Downloader Pro</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,34 +11,34 @@
   <section class="panel">
     <div class="header">
       <div>
-        <h1>Facebook Video Downloader</h1>
-        <p class="subtitle">วางลิงก์ Facebook แล้วเลือกความคมชัดเพื่อดาวน์โหลด</p>
+        <h1>Story Video Downloader</h1>
+        <p class="subtitle">วางลิงก์ Facebook หรือ Instagram แล้วเลือกความคมชัดเพื่อดาวน์โหลด</p>
       </div>
       <span class="badge-pro">PRO</span>
     </div>
 
     <form class="url-form" onsubmit="analyzeUrl(event)">
-      <label for="url-input">Facebook URL</label>
+      <label for="url-input">Facebook / Instagram URL</label>
       <div class="input-row">
-        <input type="url" id="url-input" placeholder="https://www.facebook.com/stories/..." autocomplete="off" required>
+        <input type="url" id="url-input" placeholder="https://www.instagram.com/stories/..." autocomplete="off" required oninput="updateViewSourceLinkFromInput()">
         <button class="btn-primary" id="analyze-btn" type="submit">ค้นหาวิดีโอ</button>
       </div>
-      <p class="hint">รองรับวิดีโอและ Story จาก Facebook โดยใช้ URL หรือ Page Source จาก browser ที่เปิดดูได้</p>
+      <p class="hint">รองรับวิดีโอและ Story จาก Facebook / Instagram โดยใช้ URL หรือ Page Source จาก browser ที่เปิดดูได้</p>
       <div id="error" class="err"></div>
     </form>
   </section>
 
-  <section class="panel source-panel" id="source-fallback" hidden>
+  <section class="panel source-panel" id="source-fallback">
     <div class="section-title">
-      <h2>ใช้ Source จาก browser ที่ login</h2>
+      <h2>Page Source</h2>
     </div>
-    <p class="hint">Copy ลิงก์ View Source ด้านล่างไปเปิดใน browser ที่ login Facebook อยู่ จากนั้น copy source ทั้งหน้ามาวาง แล้วกด Show Download</p>
+    <p class="hint">ถ้า URL ดึงตรงไม่ได้ ให้ copy ลิงก์ View Source ไปเปิดใน browser ที่ login อยู่ แล้ว copy source ทั้งหน้ามาวาง จากนั้นกด Show Download</p>
     <div class="source-url-row">
-      <a id="view-source-link" class="source-link" href="#" target="_blank" rel="noopener noreferrer">view-source:</a>
+      <a id="view-source-link" class="source-link" href="#" target="_blank" rel="noopener noreferrer">วาง URL ด้านบนเพื่อสร้าง View Source link</a>
       <button class="btn-secondary" type="button" onclick="copyViewSourceUrl()">Copy Link</button>
     </div>
     <label class="source-label" for="source-input">Page Source</label>
-    <textarea id="source-input" placeholder="วาง source จากหน้า view-source ที่นี่"></textarea>
+    <textarea id="source-input" placeholder="วาง source จากหน้า view-source หรือ response ที่มี manifest_xml / .mp4 ที่นี่"></textarea>
     <div class="fallback-actions">
       <button class="btn-primary" type="button" onclick="parseSourceFromTextarea()">Show Download</button>
     </div>
