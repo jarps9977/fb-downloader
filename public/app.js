@@ -1,220 +1,336 @@
-// ── Tab switching ─────────────────────────────────────────────────────────────
-function switchTab(tab) {
-  document.getElementById('tab-url').style.display   = tab === 'url'   ? '' : 'none';
-  document.getElementById('tab-paste').style.display = tab === 'paste' ? '' : 'none';
-  document.querySelectorAll('.tab-btn').forEach(function(b, i) {
-    b.classList.toggle('active', (tab === 'url' && i === 0) || (tab === 'paste' && i === 1));
-  });
-  document.getElementById('results-section').style.display = 'none';
-  document.getElementById('results-list').innerHTML = '';
-  clearErrors();
-}
+var currentStreams = [];
+var pendingSourceUrl = '';
 
-function clearErrors() {
-  ['url-error','paste-error'].forEach(function(id) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = '';
-  });
-}
+async function analyzeUrl(event) {
+  event.preventDefault();
 
-// ── Tab 1: Fetch from URL ─────────────────────────────────────────────────────
-async function fetchFromUrl() {
   var url = document.getElementById('url-input').value.trim();
-  var errEl = document.getElementById('url-error');
-  var btn   = document.getElementById('url-btn');
-  errEl.textContent = '';
+  var errorEl = document.getElementById('error');
+  var button = document.getElementById('analyze-btn');
+  errorEl.textContent = '';
+  hideSourceFallback();
+  resetResults(false);
 
-  if (!url) { errEl.textContent = 'กรุณาใส่ URL'; return; }
-  if (!url.match(/^https?:\/\/(www\.)?(facebook\.com|fb\.watch)\//i)) {
-    errEl.textContent = 'URL ต้องเป็น Facebook เท่านั้น';
+  if (!url) {
+    errorEl.textContent = 'กรุณาใส่ URL';
     return;
   }
 
-  btn.disabled    = true;
-  btn.textContent = 'กำลังดึงข้อมูล...';
-  showLoading('กำลัง fetch page source จาก Facebook...');
+  if (!url.match(/^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch)\//i)) {
+    errorEl.textContent = 'URL ต้องเป็น Facebook หรือ fb.watch เท่านั้น';
+    return;
+  }
+
+  pendingSourceUrl = url;
+  button.disabled = true;
+  button.textContent = 'กำลังค้นหา...';
+  showLoading('กำลังดึงข้อมูลจาก Facebook...');
 
   try {
-    // Step 1: fetch source
-    var fetchResp = await fetch('/api/fetch-source', {
+    var resp = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: url })
     });
-    var fetchData = await fetchResp.json();
-    if (!fetchResp.ok) {
-      errEl.textContent = fetchData.error || 'fetch ไม่สำเร็จ';
+
+    var data = await resp.json();
+    if (!resp.ok) {
+      errorEl.textContent = '';
+      showSourceFallback(url);
       return;
     }
 
-    // Step 2: parse
-    hideLoading();
-    showLoading('กำลังวิเคราะห์หา video URL...');
-    await parseAndRender(fetchData.source, errEl);
-
-  } catch (e) {
-    errEl.textContent = 'เชื่อมต่อ server ไม่ได้ — กรุณารัน: node server.js แล้วเปิด http://localhost:3000';
+    currentStreams = uniqueQualityStreams(data.streams || []);
+    renderResults(currentStreams);
+  } catch (err) {
+    errorEl.textContent = 'เชื่อมต่อ server ไม่ได้ กรุณารัน npm start แล้วลองใหม่';
   } finally {
     hideLoading();
-    btn.disabled    = false;
-    btn.textContent = 'ดึงข้อมูลวิดีโอ';
+    button.disabled = false;
+    button.textContent = 'ค้นหาวิดีโอ';
   }
 }
 
-// ── Tab 2: Parse from pasted source ──────────────────────────────────────────
-async function parseFromSource() {
-  var src   = document.getElementById('source-input').value.trim();
-  var errEl = document.getElementById('paste-error');
-  var btn   = document.getElementById('parse-btn');
-  errEl.textContent = '';
+function showSourceFallback(url) {
+  pendingSourceUrl = url;
+  var viewSourceUrl = 'view-source:' + url;
+  var panel = document.getElementById('source-fallback');
+  var link = document.getElementById('view-source-link');
+  link.href = viewSourceUrl;
+  link.textContent = viewSourceUrl;
+  document.getElementById('source-input').value = '';
+  panel.hidden = false;
+  document.getElementById('source-status').textContent = '';
+}
 
-  if (!src) { errEl.textContent = 'กรุณา paste source code ก่อน'; return; }
+function hideSourceFallback() {
+  document.getElementById('source-fallback').hidden = true;
+  document.getElementById('source-status').textContent = '';
+}
 
-  btn.disabled    = true;
-  btn.textContent = 'กำลังค้นหา...';
-  showLoading('กำลังวิเคราะห์หา video URL...');
+async function importSourceFromClipboard() {
+  var statusEl = document.getElementById('source-status');
+  statusEl.textContent = '';
+  showLoading('กำลังอ่าน source จาก clipboard...');
 
   try {
-    await parseAndRender(src, errEl);
-  } catch (e) {
-    errEl.textContent = 'เชื่อมต่อ server ไม่ได้ — กรุณารัน: node server.js แล้วเปิด http://localhost:3000';
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      statusEl.textContent = 'Browser นี้ยังไม่อนุญาตให้อ่าน clipboard จากหน้าเว็บ';
+      return;
+    }
+
+    var source = await navigator.clipboard.readText();
+    if (!source || source.length < 1000) {
+      statusEl.textContent = 'ยังไม่พบ source ที่ถูกต้องใน clipboard';
+      return;
+    }
+
+    document.getElementById('source-input').value = source;
+    await parseSourceInBackground(source, statusEl);
+  } catch (err) {
+    statusEl.textContent = 'อ่าน clipboard ไม่สำเร็จ กรุณาอนุญาตสิทธิ์ clipboard แล้วลองใหม่';
   } finally {
     hideLoading();
-    btn.disabled    = false;
-    btn.textContent = 'ค้นหาวิดีโอ';
   }
 }
 
-// ── Core: send source to /api/parse and render results ────────────────────────
-async function parseAndRender(source, errEl) {
+async function copyViewSourceUrl() {
+  var statusEl = document.getElementById('source-status');
+  var link = document.getElementById('view-source-link').href;
+  statusEl.textContent = '';
+
+  try {
+    await navigator.clipboard.writeText(link);
+    statusEl.textContent = 'Copy link แล้ว เปิดแท็บใหม่แล้ววาง URL นี้ได้เลย';
+  } catch (err) {
+    statusEl.textContent = 'Copy link อัตโนมัติไม่สำเร็จ ให้เลือก link แล้ว copy เอง';
+  }
+}
+
+async function parseSourceFromTextarea() {
+  var statusEl = document.getElementById('source-status');
+  var source = document.getElementById('source-input').value.trim();
+  statusEl.textContent = '';
+
+  if (!source || source.length < 1000) {
+    statusEl.textContent = 'กรุณาวาง source จากหน้า View Source ก่อน';
+    return;
+  }
+
+  showLoading('กำลังค้นหาวิดีโอจาก source...');
+  try {
+    await parseSourceInBackground(source, statusEl);
+  } finally {
+    hideLoading();
+  }
+}
+
+async function parseSourceInBackground(source, statusEl) {
   var resp = await fetch('/api/parse', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ source: source })
   });
-  var data = await resp.json();
 
+  var data = await resp.json();
   if (!resp.ok) {
-    errEl.textContent = data.error || 'ไม่พบ video URL';
+    statusEl.textContent = data.error || 'source นี้ยังไม่พบวิดีโอ';
     return;
   }
 
-  renderResults(data.streams);
+  currentStreams = uniqueQualityStreams(data.streams || []);
+  hideSourceFallback();
+  renderResults(currentStreams);
 }
 
-// ── Render result list ────────────────────────────────────────────────────────
-function getBadgeClass(label) {
-  var l = label.toLowerCase();
-  if (l.includes('2160') || l.includes('4k'))  return 'badge-4k';
-  if (l.includes('1080'))                       return 'badge-fhd';
-  if (l.includes('720')  || l.includes('hd'))  return 'badge-hd';
-  return 'badge-sd';
+function uniqueQualityStreams(streams) {
+  var wanted = [1080, 720, 480, 360];
+  var byQuality = {};
+
+  streams.forEach(function(stream) {
+    var quality = Number(stream.quality || 0);
+    if (!wanted.includes(quality)) return;
+
+    var existing = byQuality[quality];
+    if (!existing) {
+      byQuality[quality] = stream;
+      return;
+    }
+
+    if (!existing.isDash && stream.isDash) return;
+    if ((stream.audioUrl && !existing.audioUrl) || (stream.url && !existing.url)) {
+      byQuality[quality] = stream;
+    }
+  });
+
+  return wanted.filter(function(quality) {
+    return byQuality[quality];
+  }).map(function(quality) {
+    return byQuality[quality];
+  });
 }
 
 function renderResults(streams) {
-  var resList    = document.getElementById('results-list');
-  var resSection = document.getElementById('results-section');
-  resList.innerHTML = '';
+  var resultsSection = document.getElementById('results-section');
+  var resultsList = document.getElementById('results-list');
+  resultsList.innerHTML = '';
 
-  streams.forEach(function(item) {
-    var div    = document.createElement('div');
-    div.className = 'result-item';
+  streams.forEach(function(stream, index) {
+    var item = document.createElement('article');
+    item.className = 'result-item';
 
-    var badge  = document.createElement('span');
-    badge.className = 'quality-badge ' + getBadgeClass(item.label);
-    badge.textContent = item.label;
+    var meta = document.createElement('div');
+    meta.className = 'result-meta';
 
-    var preview = document.createElement('span');
-    preview.className   = 'url-preview';
-    preview.textContent = item.url.substring(0, 65) + '...';
-    preview.title       = item.url;
+    var badge = document.createElement('span');
+    badge.className = 'quality-badge ' + getBadgeClass(stream.label);
+    badge.textContent = stream.label || 'Video';
 
-    var btn = document.createElement('button');
-    btn.className   = 'btn-download';
-    btn.textContent = 'Download';
+    var detail = document.createElement('p');
+    detail.textContent = stream.isDash ? 'ไฟล์วิดีโอ' : 'ไฟล์ MP4 พร้อมดาวน์โหลด';
 
-    if (item.isDash) {
-      btn.onclick = (function(u, l, b) {
-        return function() { downloadDash(u, null, l, b); };
-      })(item.url, item.label, btn);
-    } else {
-      btn.onclick = (function(u, l, b) {
-        return function() { downloadProxy(u, l, b); };
-      })(item.url, item.label, btn);
-    }
+    meta.appendChild(badge);
+    meta.appendChild(detail);
 
-    div.appendChild(badge);
-    div.appendChild(preview);
-    div.appendChild(btn);
-    resList.appendChild(div);
+    var button = document.createElement('button');
+    button.className = 'btn-download';
+    button.type = 'button';
+    button.textContent = 'Download';
+    button.onclick = function() {
+      downloadStream(index, button);
+    };
+
+    item.appendChild(meta);
+    item.appendChild(button);
+    resultsList.appendChild(item);
   });
 
-  resSection.style.display = 'block';
+  resultsSection.hidden = streams.length === 0;
 }
 
-// ── Download: proxy (SD/HD) ───────────────────────────────────────────────────
-function downloadProxy(url, label, btn) {
-  btn.disabled    = true;
-  btn.textContent = 'กำลัง download...';
-  var filename = 'fb_video_' + label.replace(/[^a-z0-9]/gi,'_') + '.mp4';
-  var a = document.createElement('a');
-  a.href     = '/api/download?url=' + encodeURIComponent(url) + '&filename=' + encodeURIComponent(filename);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function() {
-    btn.disabled    = false;
-    btn.textContent = 'Download';
-  }, 3000);
+function getBadgeClass(label) {
+  var value = String(label || '').toLowerCase();
+  if (value.includes('2160') || value.includes('4k')) return 'badge-4k';
+  if (value.includes('1080')) return 'badge-fhd';
+  if (value.includes('720') || value.includes('hd')) return 'badge-hd';
+  return 'badge-sd';
 }
 
-// ── Download: DASH merge via ffmpeg ──────────────────────────────────────────
-async function downloadDash(videoUrl, audioUrl, label, btn) {
-  btn.disabled    = true;
-  btn.textContent = 'กำลัง merge...';
-  showLoading('กำลัง merge ' + label + ' ด้วย ffmpeg...');
+function downloadStream(index, button) {
+  var stream = currentStreams[index];
+  if (!stream) return;
+
+  if (stream.isDash) {
+    downloadVideoOnly(stream, button);
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = 'Downloading...';
+  var filename = 'fb_video_' + safeName(stream.label || 'video') + '.mp4';
+  downloadDirectUrl(stream.url, filename);
+  markDownloadDone(button, 'Download สำเร็จ');
+}
+
+function downloadVideoOnly(stream, button) {
+  button.disabled = true;
+  button.textContent = 'Downloading...';
+  downloadDirectUrl(stream.url, 'fb_video_' + safeName(stream.label || 'video') + '.mp4');
+  markDownloadDone(button, 'Download สำเร็จ');
+}
+
+async function downloadDash(stream, button) {
+  button.disabled = true;
+  button.textContent = 'Merging...';
+  showLoading('กำลังรวมไฟล์วิดีโอความคมชัดสูง...');
+
   try {
     var resp = await fetch('/api/merge', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoUrl: videoUrl, audioUrl: audioUrl, quality: label })
+      body: JSON.stringify({
+        videoUrl: stream.url,
+        audioUrl: stream.audioUrl || null,
+        quality: stream.label || 'video'
+      })
     });
+
     if (!resp.ok) {
       var err = await resp.json();
-      alert('Merge ไม่สำเร็จ: ' + (err.error || resp.status));
+      if (err.canDownloadVideoOnly && err.fallbackUrl) {
+        downloadDirectUrl(err.fallbackUrl, 'fb_video_' + safeName((err.fallbackLabel || stream.label || 'video') + '_video_only') + '.mp4');
+        markDownloadDone(button, 'Download สำเร็จ');
+        return;
+      }
+      markDownloadDone(button, err.error || 'Download ไม่สำเร็จ', true);
       return;
     }
-    var blob   = await resp.blob();
-    var objUrl = URL.createObjectURL(blob);
-    var a      = document.createElement('a');
-    a.href     = objUrl;
-    a.download = 'fb_video_' + label.replace(/[^a-z0-9]/gi,'_') + '.mp4';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(objUrl);
-  } catch (e) {
-    alert('เกิดข้อผิดพลาด: ' + e.message);
+
+    var blob = await resp.blob();
+    var objectUrl = URL.createObjectURL(blob);
+    var anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = 'fb_video_' + safeName(stream.label || 'video') + '.mp4';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    markDownloadDone(button, 'Download ไม่สำเร็จ: ' + err.message, true);
   } finally {
     hideLoading();
-    btn.disabled    = false;
-    btn.textContent = 'Download';
   }
 }
 
-function clearAll() {
-  document.getElementById('source-input').value = '';
-  clearErrors();
-  document.getElementById('results-section').style.display = 'none';
+function downloadDirectUrl(url, filename) {
+  var anchor = document.createElement('a');
+  anchor.href = '/api/download?url=' + encodeURIComponent(url) + '&filename=' + encodeURIComponent(filename || 'fb_video.mp4');
+  anchor.download = filename || 'fb_video.mp4';
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+}
+
+function markDownloadDone(button, message, isError) {
+  button.disabled = false;
+  button.textContent = isError ? 'Error' : 'Download';
+  setStatusMessage(button, message, isError);
+}
+
+function setStatusMessage(button, message, isError) {
+  var item = button.closest('.result-item');
+  if (!item) return;
+
+  var status = item.querySelector('.download-status');
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'download-status';
+    item.appendChild(status);
+  }
+  status.textContent = message;
+  status.classList.toggle('is-error', !!isError);
+}
+
+function resetResults(clearInput) {
+  currentStreams = [];
   document.getElementById('results-list').innerHTML = '';
+  document.getElementById('results-section').hidden = true;
+  if (clearInput !== false) {
+    document.getElementById('url-input').value = '';
+    document.getElementById('error').textContent = '';
+    hideSourceFallback();
+  }
+}
+
+function safeName(value) {
+  return String(value).replace(/[^a-z0-9]/gi, '_');
 }
 
 function showLoading(text) {
   document.getElementById('loading-text').textContent = text || 'กำลังประมวลผล...';
-  document.getElementById('loading-overlay').style.display = 'flex';
+  document.getElementById('loading-overlay').hidden = false;
 }
 
 function hideLoading() {
-  document.getElementById('loading-overlay').style.display = 'none';
+  document.getElementById('loading-overlay').hidden = true;
 }
