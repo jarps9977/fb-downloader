@@ -78,7 +78,7 @@ Recommended free/low-cost options:
 - Railway
 - Koyeb
 
-`.github/workflows/keepalive.yml` pings `/healthz` every 10 minutes so the Render free instance does not sleep. GitHub pauses scheduled workflows after 60 days without repo activity.
+To keep the Render free instance awake, point an external monitor (for example UptimeRobot, every 5 minutes) at `/healthz`.
 
 The repo includes a `Dockerfile` (Node 20 + `ffmpeg`). On Render, create the Web Service with Language `Docker`. The repo also includes `nixpacks.toml` for platforms that use Nixpacks.
 
