@@ -357,17 +357,31 @@ app.post('/api/shortcut', shortcutLimiter, async (req, res) => {
 
   if (!media) {
     if (hasSource) return res.json({ message: 'ไม่พบรูปหรือวิดีโอในหน้านี้ ตรวจว่า login ใน Safari แล้ว' });
-    // Fragment keeps the shared link out of server logs; go.html opens it in Safari.
+    // x-safari-https (iOS 17+) opens Safari directly and skips the app's universal link.
+    const target = new URL(url);
+    target.protocol = 'https:';
     return res.json({
-      message: 'ต้อง login: เปิดใน Safari แล้วกด Share > Shortcut นี้อีกครั้ง',
-      safariUrl: `${req.protocol}://${req.get('host')}/go.html#${encodeURIComponent(url)}`,
+      message: 'ต้อง login: รอ Safari โหลดเสร็จ แล้วกด ≡ > Share > Shortcut นี้อีกครั้ง',
+      safariUrl: `x-safari-${target.href}`,
+      fallbackUrl: `${req.protocol}://${req.get('host')}/go.html#${encodeURIComponent(target.href)}`,
     });
   }
 
   const token = storeMediaSet(media);
   const base = `${req.protocol}://${req.get('host')}/api/media/file?token=${token}&index=`;
-  res.json({ files: media.items.map((_, index) => base + index) });
+  res.json({
+    files: media.items.map((_, index) => base + index),
+    summary: `บันทึกแล้ว ${media.items.map(describeMediaQuality).join(', ')}`,
+  });
 });
+
+function describeMediaQuality(item) {
+  if (item.type === 'video') {
+    const shortSide = item.dash?.quality || Math.min(item.width || 0, item.height || 0);
+    return shortSide ? `วิดีโอ ${shortSide}p` : 'วิดีโอ (SD)';
+  }
+  return item.width && item.height ? `รูป ${item.width}×${item.height}` : 'รูป';
+}
 
 function analyzeSourceDiagnostics(source) {
   const terms = [

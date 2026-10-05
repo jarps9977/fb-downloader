@@ -62,7 +62,7 @@ For iOS, `view-source:` may not work directly. Use Safari Web Inspector or a Sho
 ### iOS: Save to Photos
 
 - In Safari, the results header shows `บันทึกลง Photos`. Tap once to prepare the files, then tap again to open the share sheet and choose Save Image / Save Video.
-- iOS Shortcut: share a link from the Facebook / Instagram app. The Shortcut calls `POST /api/shortcut` and saves each returned file to the Photo Album. If the link needs login, the response includes `safariUrl` (`/go.html`), which opens the link in Safari. Share from Safari to the same Shortcut, and it sends `document.documentElement.outerHTML` as `source`.
+- iOS Shortcut: share a link from the Facebook / Instagram app. The Shortcut calls `POST /api/shortcut` and saves each returned file to the Photo Album, then shows `summary` (for example `วิดีโอ 1080p, รูป 1440×1800`). If the link needs login, the response includes `safariUrl` (an `x-safari-https://` link, iOS 17+), which opens the link directly in Safari. `fallbackUrl` (`/go.html`) shows a copyable link for older iOS. Share from Safari to the same Shortcut, and it sends `document.documentElement.outerHTML` as `source`.
 
 ## Deployment
 
