@@ -360,7 +360,14 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
   try {
     if (hasSource) {
       const extracted = await extractMediaFromSource(source);
-      if (extracted.items.length > 0) media = extracted;
+      if (extracted.items.length > 0) {
+        media = extracted;
+      } else {
+        // Mobile FB story pages carry no JSON payload, only the <video> MP4 URL.
+        const stream = (await getStreamsFromSource(source))
+          .find(s => isAllowedMediaUrl(s.url) && (!s.isDash || (s.audioUrl && isAllowedMediaUrl(s.audioUrl))));
+        if (stream) media = { prefix: 'video', items: [streamToMediaItem(stream)] };
+      }
     } else {
       media = (await analyzeRemoteUrl(url, process.env.FB_COOKIE || '')).media;
     }
@@ -829,6 +836,20 @@ function buildMediaResponse(set, streams) {
 
 const STREAM_QUALITIES = [2160, 1440, 1080, 720, 480, 360];
 
+// Stream qualities are label guesses, so progressiveQuality stays unknown.
+function streamToMediaItem(stream) {
+  const dash = stream.isDash && stream.audioUrl ? { videoUrl: stream.url, audioUrl: stream.audioUrl, quality: stream.quality } : null;
+  return {
+    type: 'video',
+    url: stream.url,
+    width: null,
+    height: null,
+    progressiveQuality: 0,
+    dash,
+    dashIos: dash && IOS_VIDEO_CODEC_PATTERN.test(stream.codecs || '') ? dash : null,
+  };
+}
+
 // One stream per quality, preferring DASH with audio; CDN URLs stay server-side behind a token.
 function buildStreamsResponse(streams) {
   const byQuality = new Map();
@@ -845,14 +866,7 @@ function buildStreamsResponse(streams) {
   const selected = STREAM_QUALITIES.filter(quality => byQuality.has(quality)).map(quality => byQuality.get(quality));
   if (selected.length === 0) return { streams: [] };
 
-  const items = selected.map(stream => ({
-    type: 'video',
-    url: stream.url,
-    width: null,
-    height: null,
-    progressiveQuality: 0,
-    dash: stream.isDash && stream.audioUrl ? { videoUrl: stream.url, audioUrl: stream.audioUrl, quality: stream.quality } : null,
-  }));
+  const items = selected.map(streamToMediaItem);
   return {
     streamToken: storeMediaSet({ prefix: 'video', items }),
     streams: selected.map(stream => ({
