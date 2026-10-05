@@ -6,14 +6,24 @@
   <meta name="referrer" content="no-referrer">
   <title>Open in Safari</title>
   <link rel="stylesheet" href="style.css">
+  <style>
+    .go-link { display: block; word-break: break-all; padding: 10px 12px; border-radius: 10px; background: rgba(127, 127, 127, 0.12); font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; user-select: all; -webkit-user-select: all; }
+    .go-steps { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }
+  </style>
 </head>
 <body>
 <main class="app-shell">
   <section class="panel">
-    <h2>เปิดใน Safari</h2>
-    <p id="go-status">กำลังเปิดลิงก์...</p>
-    <p>เมื่อหน้าโหลดเสร็จ กด Share แล้วเลือก Shortcut เดิมอีกครั้ง</p>
-    <p>ถ้าแอปเด้งขึ้นมาแทน ให้วางลิงก์ (copy ไว้ให้แล้ว) ในช่อง address ของ Safari</p>
+    <h2>เปิด story ใน Safari</h2>
+    <p id="go-status">ลิงก์ถูก copy ไว้แล้ว</p>
+    <code id="go-link" class="go-link"></code>
+    <button class="btn-primary" id="go-copy" type="button" hidden>Copy ลิงก์</button>
+    <ol class="go-steps">
+      <li>แตะช่อง address ด้านล่าง แล้ววางลิงก์ แล้วกด Go</li>
+      <li>รอ story โหลดและเล่น (ต้อง login ใน Safari)</li>
+      <li>แตะปุ่ม ≡ ข้างช่อง address แล้วเลือก Share › Save to Photos</li>
+    </ol>
+    <p>การแตะลิงก์จะเด้งเข้าแอป ต้องวางในช่อง address เท่านั้น</p>
   </section>
 </main>
 <script>
@@ -23,19 +33,34 @@
       target = decodeURIComponent(location.hash.slice(1));
     } catch (err) {}
 
-    // Only redirect to Facebook / Instagram to avoid an open redirect.
+    // Only show Facebook / Instagram links.
     var allowed = false;
     try {
       var parsed = new URL(target);
       allowed = parsed.protocol === 'https:' && /(^|\.)(facebook\.com|fb\.watch|instagram\.com)$/i.test(parsed.hostname);
     } catch (err) {}
 
+    var status = document.getElementById('go-status');
     if (!allowed) {
-      document.getElementById('go-status').textContent = 'ลิงก์ไม่ถูกต้อง';
+      status.textContent = 'ลิงก์ไม่ถูกต้อง';
       return;
     }
-    // Script navigation stays in Safari instead of triggering the app's universal link.
-    location.replace(target);
+
+    // No auto-redirect: iOS hands script navigation to the app via universal links.
+    document.getElementById('go-link').textContent = target;
+    var copyBtn = document.getElementById('go-copy');
+    copyBtn.hidden = false;
+    copyBtn.onclick = function() {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        status.textContent = 'กดค้างที่ลิงก์ด้านบนแล้วเลือก Copy';
+        return;
+      }
+      navigator.clipboard.writeText(target).then(function() {
+        status.textContent = 'Copy แล้ว';
+      }, function() {
+        status.textContent = 'กดค้างที่ลิงก์ด้านบนแล้วเลือก Copy';
+      });
+    };
   })();
 </script>
 </body>
