@@ -545,8 +545,8 @@ async function resolveDashUpgrade(item, manifest) {
     if (!best || !best.audioUrl) return null;
     if (!isAllowedMediaUrl(best.url) || !isAllowedMediaUrl(best.audioUrl)) return null;
 
-    const progressiveQuality = Math.min(item.width || 0, item.height || 0);
-    if ((best.quality || 0) <= progressiveQuality) return null;
+    // Equal resolution keeps the progressive file: it already has audio and is usually H.264.
+    if ((best.quality || 0) <= (item.progressiveQuality || 0)) return null;
     return { videoUrl: best.url, audioUrl: best.audioUrl, quality: best.quality };
   } catch (err) {
     console.error('DASH manifest parse error:', err.message);
@@ -567,6 +567,7 @@ function mediaFromNode(node) {
         width: chosen.width || node.original_width || null,
         height: chosen.height || node.original_height || null,
         previewUrl: pickPreview(node.image_versions2?.candidates, 'url')?.url || null,
+        progressiveQuality: video ? Math.min(video.width || 0, video.height || 0) : 0,
         dashManifest: video ? asManifest(node.video_dash_manifest) : null,
         code: node.code,
       };
@@ -584,6 +585,8 @@ function mediaFromNode(node) {
       width: node.dimensions?.width || null,
       height: node.dimensions?.height || null,
       previewUrl: pickPreview(resources, 'url')?.url || node.display_url,
+      // dimensions describe the original upload, not the video_url rendition.
+      progressiveQuality: 0,
       dashManifest: isVideo ? asManifest(node.dash_info?.video_dash_manifest) : null,
       code: node.shortcode,
     };
@@ -591,13 +594,26 @@ function mediaFromNode(node) {
 
   const videoKey = FB_VIDEO_URL_KEYS.find(key => typeof node[key] === 'string' && node[key]);
   if (videoKey) {
+    // Current FB payloads keep HD/SD and DASH under videoDeliveryResponseFragment; playable_url is SD.
+    const delivery = node.videoDeliveryResponseFragment?.videoDeliveryResponseResult || {};
+    const legacy = node.videoDeliveryLegacyFields || {};
+    const progressive = Array.isArray(delivery.progressive_urls) ? delivery.progressive_urls : [];
+    const hdUrl = progressive.find(p => p?.metadata?.quality === 'HD' && typeof p.progressive_url === 'string')?.progressive_url
+      || [legacy.browser_native_hd_url, node.browser_native_hd_url, node.playable_url_quality_hd].find(url => typeof url === 'string' && url);
+    const shortSide = Math.min(node.original_width || node.width || 0, node.original_height || node.height || 0);
+
     return {
       type: 'video',
-      url: node[videoKey],
-      width: node.width || null,
-      height: node.height || null,
-      previewUrl: node.preferred_thumbnail?.image?.uri || node.thumbnailImage?.uri || null,
-      dashManifest: asManifest(node.dash_manifest) || asManifest(node.manifest_xml) || asManifest(node.dash_manifests?.[0]?.manifest_xml),
+      url: hdUrl || node[videoKey],
+      width: hdUrl ? node.original_width || node.width || null : null,
+      height: hdUrl ? node.original_height || node.height || null : null,
+      // SD resolution is not exposed, so any DASH rendition with audio beats it.
+      progressiveQuality: hdUrl ? shortSide : 0,
+      previewUrl: node.preferred_thumbnail?.image?.uri || node.thumbnailImage?.uri || node.previewImage?.uri || null,
+      dashManifest: asManifest(delivery.dash_manifests?.[0]?.manifest_xml)
+        || asManifest(node.dash_manifest)
+        || asManifest(node.manifest_xml)
+        || asManifest(node.dash_manifests?.[0]?.manifest_xml),
     };
   }
 
@@ -656,6 +672,7 @@ function collectMedia(root, ctx) {
           width: media.width,
           height: media.height,
           previewUrl: media.previewUrl && isAllowedMediaUrl(media.previewUrl) ? media.previewUrl : null,
+          progressiveQuality: media.progressiveQuality || 0,
           dashManifest: media.type === 'video' ? media.dashManifest || null : null,
         });
         if (!ctx.code && media.code) ctx.code = media.code;
