@@ -397,11 +397,16 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
   });
 });
 
-// Shortcuts strips HTML-looking text to plain text, so the Shortcut wraps pages as {"html": ...};
-// it may also turn JSON text into a Dictionary before sending it.
+// Shortcuts turns HTML-looking results into plain text and JSON-looking ones into a Dictionary
+// (which a Text field then sends as ""), so the Shortcut sends "SDL:" + JSON.
+const SHORTCUT_SOURCE_PREFIX = 'SDL:';
+
 function normalizeShortcutSource(raw) {
   let value = raw;
-  if (typeof value === 'string' && value.startsWith('{"html":')) {
+  if (typeof value === 'string' && value.startsWith(SHORTCUT_SOURCE_PREFIX)) {
+    value = value.slice(SHORTCUT_SOURCE_PREFIX.length);
+  }
+  if (typeof value === 'string' && value.startsWith('{')) {
     try {
       value = JSON.parse(value);
     } catch {}
