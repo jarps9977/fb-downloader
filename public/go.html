@@ -33,11 +33,11 @@
       target = decodeURIComponent(location.hash.slice(1));
     } catch (err) {}
 
-    // Only show Facebook / Instagram links.
+    // Only show Facebook / Instagram / TikTok links.
     var allowed = false;
     try {
       var parsed = new URL(target);
-      allowed = parsed.protocol === 'https:' && /(^|\.)(facebook\.com|fb\.watch|instagram\.com)$/i.test(parsed.hostname);
+      allowed = parsed.protocol === 'https:' && /(^|\.)(facebook\.com|fb\.watch|instagram\.com|tiktok\.com)$/i.test(parsed.hostname);
     } catch (err) {}
 
     var status = document.getElementById('go-status');

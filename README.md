@@ -1,6 +1,6 @@
 # Story Video Downloader Pro
 
-Node.js web app for extracting downloadable video URLs from Facebook and Instagram stories/videos.
+Node.js web app for extracting downloadable video URLs from Facebook and Instagram stories/videos, and TikTok videos/photo posts.
 
 The app supports two workflows:
 
@@ -9,7 +9,8 @@ The app supports two workflows:
 
 ## Features
 
-- Supports Facebook, fb.watch, and Instagram URLs.
+- Supports Facebook, fb.watch, Instagram, and TikTok URLs.
+- TikTok blocks server-side page fetches with a WAF challenge, so TikTok needs Page Source from a browser (or the iOS Shortcut run from Safari). Videos download through `www.tiktok.com/aweme/v1/play/`, which needs no cookie, at the highest `bitrateInfo` rendition (often 1080p HEVC).
 - Always shows a Page Source box for private/login-required stories.
 - Generates a `view-source:` link from the URL you enter.
 - Parses direct MP4 URLs and DASH manifests.

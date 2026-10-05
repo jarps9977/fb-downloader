@@ -48,8 +48,8 @@ async function analyzeUrl(event) {
     return;
   }
 
-  if (!url.match(/^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com)\//i)) {
-    errorEl.textContent = 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น';
+  if (!url.match(/^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com|tiktok\.com)\//i)) {
+    errorEl.textContent = 'URL ต้องเป็น Facebook, fb.watch, Instagram หรือ TikTok เท่านั้น';
     return;
   }
 

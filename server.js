@@ -106,7 +106,11 @@ function loadLocalEnv() {
 }
 
 function validateSupportedUrl(url) {
-  return /^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com)\//i.test(url || '');
+  return /^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com|tiktok\.com)\//i.test(url || '');
+}
+
+function isTiktokUrl(url) {
+  return /^https?:\/\/([^/]+\.)?tiktok\.com\//i.test(url || '');
 }
 
 function buildSourceCandidates(url) {
@@ -156,7 +160,9 @@ function normalizeVideoUrl(url) {
     .replace(/\s/g, '');
 }
 
-const ALLOWED_MEDIA_HOST_SUFFIXES = ['fbcdn.net', 'cdninstagram.com'];
+const ALLOWED_MEDIA_HOST_SUFFIXES = ['fbcdn.net', 'cdninstagram.com', 'tiktokcdn.com', 'tiktokcdn-us.com'];
+// webapp-prime CDN URLs need the httpOnly tt_chain_token cookie; this endpoint redirects to a cookie-free CDN URL.
+const TIKTOK_PLAY_PATH = '/aweme/v1/play/';
 
 function isAllowedMediaUrl(url) {
   let parsed;
@@ -170,7 +176,15 @@ function isAllowedMediaUrl(url) {
   if (parsed.port && parsed.port !== '443') return false;
 
   const host = parsed.hostname.toLowerCase();
+  if (host === 'www.tiktok.com' && parsed.pathname === TIKTOK_PLAY_PATH) return true;
   return ALLOWED_MEDIA_HOST_SUFFIXES.some(suffix => host === suffix || host.endsWith(`.${suffix}`));
+}
+
+// TikTok's play endpoint returns 403 unless the Referer is tiktok.com.
+function mediaHeaders(url, extra = {}) {
+  const headers = { ...FB_HEADERS, ...extra };
+  if (/^https:\/\/([^/]+\.)?(tiktok\.com|tiktokcdn\.com|tiktokcdn-us\.com)\//i.test(url)) headers.Referer = 'https://www.tiktok.com/';
+  return headers;
 }
 
 // Re-check every redirect hop so an allowed CDN URL cannot bounce to an internal host.
@@ -186,6 +200,8 @@ async function fetchRemoteSource(url, cookies) {
   const headers = { ...FB_HEADERS };
   if (/instagram\.com/i.test(url)) {
     headers.Referer = 'https://www.instagram.com/';
+  } else if (isTiktokUrl(url)) {
+    headers.Referer = 'https://www.tiktok.com/';
   }
   if (cookies) headers.Cookie = cookies;
 
@@ -193,6 +209,13 @@ async function fetchRemoteSource(url, cookies) {
     headers,
     timeout: 25000,
     maxRedirects: 5,
+    // Short links (fb.watch, vm.tiktok.com) redirect; never follow one off the supported sites.
+    beforeRedirect: options => {
+      const port = options.port ? `:${options.port}` : '';
+      if (!validateSupportedUrl(`${options.protocol}//${options.hostname}${port}${options.path || '/'}`)) {
+        throw new Error('Redirect target not allowed');
+      }
+    },
     decompress: true,
     proxy: false,
     validateStatus: status => status >= 200 && status < 400,
@@ -305,7 +328,7 @@ app.post('/api/analyze', analyzeLimiter, requireAccessKey, smallJson, async (req
   const cookies = req.body?.cookies || process.env.FB_COOKIE || '';
   if (!url) return res.status(400).json({ error: 'กรุณาใส่ URL' });
   if (!validateSupportedUrl(url)) {
-    return res.status(400).json({ error: 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น' });
+    return res.status(400).json({ error: 'URL ต้องเป็น Facebook, fb.watch, Instagram หรือ TikTok เท่านั้น' });
   }
 
   try {
@@ -314,9 +337,11 @@ app.post('/api/analyze', analyzeLimiter, requireAccessKey, smallJson, async (req
     if (streams) return res.json({ ...buildStreamsResponse(streams), finalUrl });
 
     return res.status(404).json({
-      error: cookies
-        ? 'ยังไม่พบไฟล์วิดีโอจาก URL นี้ แม้ใช้ session แล้ว อาจเป็น story หมดอายุหรือหน้าเว็บเปลี่ยนโครงสร้าง'
-        : 'ต้องใช้ Page Source จาก browser ที่ login',
+      error: isTiktokUrl(url)
+        ? 'TikTok บล็อกการดึงจาก server: ใช้ Page Source จาก browser'
+        : cookies
+          ? 'ยังไม่พบไฟล์วิดีโอจาก URL นี้ แม้ใช้ session แล้ว อาจเป็น story หมดอายุหรือหน้าเว็บเปลี่ยนโครงสร้าง'
+          : 'ต้องใช้ Page Source จาก browser ที่ login',
       attempts,
     });
   } catch (err) {
@@ -355,7 +380,7 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
   const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
   if (!hasSource && !hasUrl) {
     const received = `source=${rawSource === undefined ? 'none' : typeof rawSource}, url=${url === undefined ? 'none' : typeof url}`;
-    return res.json({ message: `แชร์ลิงก์ Facebook / Instagram หรือรันจาก Safari (${received})` });
+    return res.json({ message: `แชร์ลิงก์ Facebook / Instagram / TikTok หรือรันจาก Safari (${received})` });
   }
 
   let media = null;
@@ -383,7 +408,7 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
     const target = new URL(url);
     target.protocol = 'https:';
     return res.json({
-      message: 'ต้อง login: รอ Safari โหลดเสร็จ แล้วกด ≡ > Share > Shortcut นี้อีกครั้ง',
+      message: `${isTiktokUrl(url) ? 'TikTok ต้องเปิดใน Safari' : 'ต้อง login'}: รอ Safari โหลดเสร็จ แล้วกด ≡ > Share > Shortcut นี้อีกครั้ง`,
       safariUrl: `x-safari-${target.href}`,
       fallbackUrl: `${req.protocol}://${req.get('host')}/go.html#${encodeURIComponent(target.href)}`,
     });
@@ -612,6 +637,7 @@ function pickPreview(list, urlKey, minWidth = 320) {
 
 function getMediaChildren(node) {
   if (Array.isArray(node.carousel_media) && node.carousel_media.length > 0) return node.carousel_media;
+  if (Array.isArray(node.imagePost?.images) && node.imagePost.images.length > 0) return node.imagePost.images;
   const edges = node.edge_sidecar_to_children?.edges;
   if (Array.isArray(edges) && edges.length > 0) return edges.map(edge => edge?.node).filter(Boolean);
   return null;
@@ -661,11 +687,58 @@ async function resolveDashUpgrades(item, manifest) {
 
 // Progressive files are H.264, so dropping a non-iOS DASH upgrade is always importable.
 function forIos(item) {
-  return { ...item, dash: item.dashIos || null };
+  return { ...item, dash: item.dashIos || null, url: item.iosUrl || item.url };
+}
+
+const IOS_TIKTOK_CODEC_PATTERN = /^(h264|h265)/i;
+
+// One entry per bitrateInfo rendition that has a cookie-free play URL.
+function tiktokRenditions(bitrateInfo) {
+  return bitrateInfo
+    .map(entry => {
+      const play = entry?.PlayAddr || {};
+      const url = (Array.isArray(play.UrlList) ? play.UrlList : []).find(u => typeof u === 'string' && isAllowedMediaUrl(u));
+      const width = Number(play.Width) || 0;
+      const height = Number(play.Height) || 0;
+      return url ? { url, width, height, quality: Math.min(width, height), codec: String(entry.CodecType || ''), bitrate: Number(entry.Bitrate) || 0 } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      b.quality - a.quality
+      || Number(/^h264/i.test(b.codec)) - Number(/^h264/i.test(a.codec))
+      || b.bitrate - a.bitrate);
 }
 
 // Maps one JSON node in the IG v1, IG GraphQL or FB GraphQL shape to a media item.
 function mediaFromNode(node) {
+  // TikTok itemStruct (__UNIVERSAL_DATA_FOR_REHYDRATION__); photo posts are handled via getMediaChildren.
+  if (Array.isArray(node.video?.bitrateInfo) && typeof node.id === 'string' && !node.imagePost) {
+    const renditions = tiktokRenditions(node.video.bitrateInfo);
+    const best = renditions[0];
+    if (best) {
+      const ios = renditions.find(r => IOS_TIKTOK_CODEC_PATTERN.test(r.codec));
+      return {
+        type: 'video',
+        url: best.url,
+        iosUrl: ios && ios !== best ? ios.url : null,
+        width: best.width || null,
+        height: best.height || null,
+        previewUrl: [node.video.cover, node.video.originCover].find(u => typeof u === 'string') || null,
+        progressiveQuality: best.quality,
+        code: node.id,
+      };
+    }
+  }
+
+  if (Array.isArray(node.imageURL?.urlList) && node.imageWidth) {
+    const urls = node.imageURL.urlList.filter(u => typeof u === 'string');
+    // urlList may lead with HEIC; prefer JPEG for portability.
+    const url = urls.find(u => /\.jpe?g(\?|$)|jpeg/i.test(u)) || urls[0];
+    if (url) {
+      return { type: 'image', url, width: node.imageWidth, height: node.imageHeight || null, previewUrl: url };
+    }
+  }
+
   if (Array.isArray(node.video_versions) || Array.isArray(node.image_versions2?.candidates)) {
     const video = pickLargest(node.video_versions, 'url');
     const image = pickLargest(node.image_versions2?.candidates, 'url');
@@ -747,7 +820,10 @@ function mediaFromNode(node) {
 // Same asset shows up in several payloads with different signed query strings.
 function mediaDedupeKey(url) {
   try {
-    return new URL(url).pathname;
+    const parsed = new URL(url);
+    // Every TikTok play URL shares one path; the item id identifies the video.
+    if (parsed.pathname === TIKTOK_PLAY_PATH) return `${TIKTOK_PLAY_PATH}${parsed.searchParams.get('item_id')}`;
+    return parsed.pathname;
   } catch {
     return url;
   }
@@ -766,7 +842,7 @@ function collectMedia(root, ctx) {
 
     const children = getMediaChildren(node);
     if (children) {
-      if (!ctx.code) ctx.code = node.code || node.shortcode || null;
+      if (!ctx.code) ctx.code = node.code || node.shortcode || (node.imagePost ? node.id : null) || null;
       for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
       continue;
     }
@@ -779,6 +855,7 @@ function collectMedia(root, ctx) {
         ctx.items.push({
           type: media.type,
           url: media.url,
+          iosUrl: media.iosUrl && isAllowedMediaUrl(media.iosUrl) ? media.iosUrl : null,
           width: media.width,
           height: media.height,
           previewUrl: media.previewUrl && isAllowedMediaUrl(media.previewUrl) ? media.previewUrl : null,
@@ -937,7 +1014,7 @@ async function openMediaItem(item, signal) {
     url: item.url,
     responseType: 'stream',
     timeout: 90000,
-    headers: FB_HEADERS,
+    headers: mediaHeaders(item.url),
     proxy: false,
     maxRedirects: 5,
     beforeRedirect: assertAllowedRedirect,
@@ -956,7 +1033,7 @@ async function probeContentLength(url) {
   const base = {
     url,
     timeout: 15000,
-    headers: { ...FB_HEADERS, 'Accept-Encoding': 'identity' },
+    headers: mediaHeaders(url, { 'Accept-Encoding': 'identity' }),
     proxy: false,
     maxRedirects: 5,
     beforeRedirect: assertAllowedRedirect,
@@ -965,7 +1042,8 @@ async function probeContentLength(url) {
   try {
     const head = await axios({ ...base, method: 'HEAD' });
     const length = parseInt(head.headers['content-length'] || '', 10);
-    if (length > 0) return length;
+    // TikTok's play endpoint answers HEAD with a small non-media body instead of redirecting.
+    if (length > 0 && /^(image|video)\//i.test(String(head.headers['content-type'] || ''))) return length;
   } catch {}
 
   try {
@@ -1058,7 +1136,7 @@ app.get('/api/media/preview', previewLimiter, async (req, res) => {
   const url = wantFull ? item.url : item.previewUrl;
   if (!url) return res.status(404).send('No preview');
 
-  const headers = { ...FB_HEADERS, 'Accept-Encoding': 'identity' };
+  const headers = mediaHeaders(url, { 'Accept-Encoding': 'identity' });
   const range = req.headers.range;
   if (wantFull && typeof range === 'string' && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
 
@@ -1131,7 +1209,7 @@ const MEDIA_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024;
 function downloadFile(url, dest) {
   return new Promise(async (resolve, reject) => {
     try {
-      const resp = await axios({ method: 'GET', url, responseType: 'stream', timeout: 90000, headers: FB_HEADERS, proxy: false, maxRedirects: 5, beforeRedirect: assertAllowedRedirect });
+      const resp = await axios({ method: 'GET', url, responseType: 'stream', timeout: 90000, headers: mediaHeaders(url), proxy: false, maxRedirects: 5, beforeRedirect: assertAllowedRedirect });
       const writer = fs.createWriteStream(dest);
       let size = 0;
       // axios does not enforce maxContentLength on streams.

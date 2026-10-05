@@ -12,18 +12,18 @@
     <div class="header">
       <div>
         <h1>Story Video Downloader</h1>
-        <p class="subtitle">วางลิงก์ Facebook หรือ Instagram แล้วเลือกความคมชัดเพื่อดาวน์โหลด</p>
+        <p class="subtitle">วางลิงก์ Facebook, Instagram หรือ TikTok แล้วเลือกความคมชัดเพื่อดาวน์โหลด</p>
       </div>
       <span class="badge-pro">PRO</span>
     </div>
 
     <form class="url-form" onsubmit="analyzeUrl(event)">
-      <label for="url-input">Facebook / Instagram URL</label>
+      <label for="url-input">Facebook / Instagram / TikTok URL</label>
       <div class="input-row">
         <input type="url" id="url-input" placeholder="https://www.instagram.com/stories/..." autocomplete="off" required oninput="updateViewSourceLinkFromInput()">
         <button class="btn-primary" id="analyze-btn" type="submit">ค้นหาวิดีโอ</button>
       </div>
-      <p class="hint">รองรับวิดีโอและ Story จาก Facebook / Instagram โดยใช้ URL หรือ Page Source จาก browser ที่เปิดดูได้</p>
+      <p class="hint">รองรับวิดีโอและ Story จาก Facebook / Instagram และวิดีโอ/รูปจาก TikTok โดยใช้ URL หรือ Page Source จาก browser ที่เปิดดูได้</p>
       <div id="error" class="err"></div>
     </form>
   </section>
