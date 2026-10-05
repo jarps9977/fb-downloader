@@ -209,6 +209,12 @@ h2 {
   font-size: 18px;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .results-list {
   display: grid;
   gap: 10px;
@@ -307,6 +313,7 @@ h2 {
   .result-item,
   .result-meta,
   .section-title,
+  .section-actions,
   .fallback-actions,
   .source-url-row {
     grid-template-columns: 1fr;

@@ -47,8 +47,11 @@
 
   <section class="panel results-panel" id="results-section" hidden>
     <div class="section-title">
-      <h2>เลือกความคมชัด</h2>
-      <button class="btn-secondary" type="button" onclick="resetResults()">ล้างผลลัพธ์</button>
+      <h2 id="results-title">เลือกความคมชัด</h2>
+      <div class="section-actions">
+        <button class="btn-primary" id="zip-btn" type="button" onclick="downloadMediaZip()" hidden>Download ทั้งหมด (ZIP)</button>
+        <button class="btn-secondary" type="button" onclick="resetResults()">ล้างผลลัพธ์</button>
+      </div>
     </div>
     <div id="results-list" class="results-list"></div>
   </section>

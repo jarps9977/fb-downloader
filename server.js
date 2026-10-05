@@ -5,12 +5,56 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '80mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 loadLocalEnv();
+
+// Behind Render's load balancer; needed so req.ip is the client address.
+app.set('trust proxy', 1);
+
+const analyzeLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
+const parseLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
+const downloadLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
+const mergeLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
+const zipLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
+
+// In-memory fixed window per IP; fine for a single instance, resets on restart.
+function createRateLimiter({ windowMs, max }) {
+  const hits = new Map();
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of hits) {
+      if (entry.resetAt <= now) hits.delete(key);
+    }
+  }, windowMs).unref();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = req.ip || 'unknown';
+    let entry = hits.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      hits.set(key, entry);
+    }
+    entry.count += 1;
+
+    const resetSeconds = Math.ceil((entry.resetAt - now) / 1000);
+    res.setHeader('RateLimit-Limit', String(max));
+    res.setHeader('RateLimit-Remaining', String(Math.max(0, max - entry.count)));
+    res.setHeader('RateLimit-Reset', String(resetSeconds));
+
+    if (entry.count > max) {
+      res.setHeader('Retry-After', String(resetSeconds));
+      return res.status(429).json({ error: 'เรียกใช้งานถี่เกินไป กรุณารอสักครู่แล้วลองใหม่' });
+    }
+    next();
+  };
+}
 
 const FB_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -221,7 +265,7 @@ async function getStreamsFromSource(source) {
   return results.sort((a, b) => (b.quality || 0) - (a.quality || 0));
 }
 
-app.post('/api/analyze', async (req, res) => {
+app.post('/api/analyze', analyzeLimiter, async (req, res) => {
   const { url } = req.body;
   const cookies = req.body.cookies || process.env.FB_COOKIE || '';
   if (!url) return res.status(400).json({ error: 'กรุณาใส่ URL' });
@@ -234,9 +278,15 @@ app.post('/api/analyze', async (req, res) => {
   try {
     for (const candidateUrl of buildSourceCandidates(url)) {
       const fetched = await fetchRemoteSource(candidateUrl, cookies);
-      const streams = isLoginRedirect(fetched.finalUrl) ? [] : await getStreamsFromSource(fetched.source);
-      attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length });
+      const blocked = isLoginRedirect(fetched.finalUrl);
+      const source = typeof fetched.source === 'string' ? fetched.source : JSON.stringify(fetched.source || '');
+      const streams = blocked ? [] : await getStreamsFromSource(source);
+      const media = blocked ? { items: [] } : extractMediaFromSource(source);
+      attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length, mediaCount: media.items.length });
 
+      if (media.items.length > 0) {
+        return res.json({ ...buildMediaResponse(media, streams), finalUrl: fetched.finalUrl });
+      }
       if (streams.length > 0) {
         return res.json({ streams, finalUrl: fetched.finalUrl });
       }
@@ -256,11 +306,16 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-app.post('/api/parse', async (req, res) => {
+app.post('/api/parse', parseLimiter, async (req, res) => {
   const { source } = req.body;
-  if (!source) return res.status(400).json({ error: 'No source provided' });
+  if (typeof source !== 'string' || !source) return res.status(400).json({ error: 'No source provided' });
 
   const streams = await getStreamsFromSource(source);
+  const media = extractMediaFromSource(source);
+  if (media.items.length > 0) {
+    return res.json(buildMediaResponse(media, streams));
+  }
+
   if (streams.length === 0) {
     return res.status(404).json({
       error: 'ไม่พบ video URL ใน source นี้',
@@ -388,7 +443,229 @@ function parseDashWithRegex(xml) {
   }));
 }
 
-app.post('/api/merge', async (req, res) => {
+const MEDIA_SHORTCODE_PATTERN = /^[A-Za-z0-9_-]{5,40}$/;
+const MEDIA_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
+const MEDIA_MAX_ITEMS = 50;
+const MEDIA_STORE_TTL_MS = 10 * 60_000;
+const MEDIA_STORE_MAX = 100;
+// Parsed media sets keyed by random token so the ZIP endpoint never takes media URLs from the client.
+const mediaStore = new Map();
+
+const FB_VIDEO_URL_KEYS = ['browser_native_hd_url', 'playable_url_quality_hd', 'browser_native_sd_url', 'playable_url'];
+const FB_PHOTO_IMAGE_KEYS = ['image', 'photo_image', 'viewer_image'];
+
+// Accepts a raw JSON/NDJSON response or an HTML page with <script type="application/json"> payloads.
+function parseJsonBlobs(source) {
+  const blobs = [];
+  const trimmed = source.trim();
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      blobs.push(JSON.parse(trimmed));
+    } catch {
+      for (const line of trimmed.split(/\r?\n/)) {
+        try {
+          blobs.push(JSON.parse(line));
+        } catch {}
+      }
+    }
+  }
+
+  const scriptPattern = /<script\b[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = scriptPattern.exec(source)) !== null) {
+    try {
+      blobs.push(JSON.parse(match[1]));
+    } catch {}
+  }
+
+  return blobs;
+}
+
+function findValueByKey(root, key) {
+  const stack = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (!Array.isArray(node) && Object.prototype.hasOwnProperty.call(node, key)) return node[key];
+    for (const value of Object.values(node)) stack.push(value);
+  }
+  return undefined;
+}
+
+function pickLargest(list, urlKey) {
+  const valid = (Array.isArray(list) ? list : []).filter(entry => entry && typeof entry[urlKey] === 'string');
+  if (valid.length === 0) return null;
+  return valid.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)))[0];
+}
+
+function getMediaChildren(node) {
+  if (Array.isArray(node.carousel_media) && node.carousel_media.length > 0) return node.carousel_media;
+  const edges = node.edge_sidecar_to_children?.edges;
+  if (Array.isArray(edges) && edges.length > 0) return edges.map(edge => edge?.node).filter(Boolean);
+  return null;
+}
+
+// Maps one JSON node in the IG v1, IG GraphQL or FB GraphQL shape to a media item.
+function mediaFromNode(node) {
+  if (Array.isArray(node.video_versions) || Array.isArray(node.image_versions2?.candidates)) {
+    const video = pickLargest(node.video_versions, 'url');
+    const image = pickLargest(node.image_versions2?.candidates, 'url');
+    const chosen = video || image;
+    if (chosen) {
+      return {
+        type: video ? 'video' : 'image',
+        url: chosen.url,
+        width: chosen.width || node.original_width || null,
+        height: chosen.height || node.original_height || null,
+        code: node.code,
+      };
+    }
+  }
+
+  if (typeof node.display_url === 'string' && /^(XDT)?Graph/.test(node.__typename || '')) {
+    const isVideo = !!(node.is_video && typeof node.video_url === 'string');
+    const resources = Array.isArray(node.display_resources)
+      ? node.display_resources.map(r => ({ url: r?.src, width: r?.config_width, height: r?.config_height }))
+      : [];
+    return {
+      type: isVideo ? 'video' : 'image',
+      url: isVideo ? node.video_url : (pickLargest(resources, 'url')?.url || node.display_url),
+      width: node.dimensions?.width || null,
+      height: node.dimensions?.height || null,
+      code: node.shortcode,
+    };
+  }
+
+  const videoKey = FB_VIDEO_URL_KEYS.find(key => typeof node[key] === 'string' && node[key]);
+  if (videoKey) {
+    return { type: 'video', url: node[videoKey], width: node.width || null, height: node.height || null };
+  }
+
+  if (node.__typename === 'Photo') {
+    const image = pickLargest(FB_PHOTO_IMAGE_KEYS.map(key => node[key]), 'uri');
+    if (image) return { type: 'image', url: image.uri, width: image.width || null, height: image.height || null };
+  }
+
+  return null;
+}
+
+// Same asset shows up in several payloads with different signed query strings.
+function mediaDedupeKey(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+function collectMedia(root, ctx) {
+  const stack = [root];
+  while (stack.length > 0 && ctx.items.length < MEDIA_MAX_ITEMS) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) stack.push(node[i]);
+      continue;
+    }
+
+    const children = getMediaChildren(node);
+    if (children) {
+      if (!ctx.code) ctx.code = node.code || node.shortcode || null;
+      for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+      continue;
+    }
+
+    const media = mediaFromNode(node);
+    if (media) {
+      const key = mediaDedupeKey(media.url);
+      if (isAllowedMediaUrl(media.url) && !ctx.seen.has(key)) {
+        ctx.seen.add(key);
+        ctx.items.push({ type: media.type, url: media.url, width: media.width, height: media.height });
+        if (!ctx.code && media.code) ctx.code = media.code;
+      }
+      continue;
+    }
+
+    const values = Object.values(node);
+    for (let i = values.length - 1; i >= 0; i--) stack.push(values[i]);
+  }
+}
+
+function extractMediaFromSource(source) {
+  const ctx = { items: [], seen: new Set(), code: null };
+  if (typeof source !== 'string' || !source) return { prefix: 'media', items: [] };
+
+  const blobs = parseJsonBlobs(source);
+
+  // A logged-in IG post page also embeds related posts; prefer the post's own payload.
+  for (const blob of blobs) {
+    const info = findValueByKey(blob, 'xdt_api__v1__media__shortcode__web_info');
+    if (info) collectMedia(info, ctx);
+  }
+  if (ctx.items.length === 0) {
+    for (const blob of blobs) collectMedia(blob, ctx);
+  }
+
+  const prefix = ctx.code && MEDIA_SHORTCODE_PATTERN.test(ctx.code) ? ctx.code : 'media';
+  return { prefix, items: ctx.items };
+}
+
+function storeMediaSet(set) {
+  const now = Date.now();
+  for (const [key, entry] of mediaStore) {
+    if (entry.expiresAt <= now) mediaStore.delete(key);
+  }
+  if (mediaStore.size >= MEDIA_STORE_MAX) mediaStore.delete(mediaStore.keys().next().value);
+
+  const token = crypto.randomBytes(16).toString('hex');
+  mediaStore.set(token, { ...set, expiresAt: now + MEDIA_STORE_TTL_MS });
+  return token;
+}
+
+function buildMediaFilename(prefix, item, index) {
+  return `${prefix}_${String(index + 1).padStart(2, '0')}.${item.type === 'video' ? 'mp4' : 'jpg'}`;
+}
+
+function buildMediaResponse(set, streams) {
+  const hasVideo = set.items.some(item => item.type === 'video');
+  return {
+    kind: 'media',
+    token: storeMediaSet(set),
+    prefix: set.prefix,
+    items: set.items.map((item, index) => ({ ...item, filename: buildMediaFilename(set.prefix, item, index) })),
+    // DASH-only videos are not in the JSON payloads; keep the quality list as a fallback.
+    streams: hasVideo ? [] : streams,
+  };
+}
+
+app.get('/api/media/zip', zipLimiter, async (req, res) => {
+  const { token } = req.query;
+  if (typeof token !== 'string' || !MEDIA_TOKEN_PATTERN.test(token)) {
+    return res.status(400).send('Invalid token');
+  }
+
+  const set = mediaStore.get(token);
+  if (!set || set.expiresAt <= Date.now()) {
+    return res.status(404).send('ลิงก์หมดอายุ กรุณากด Show Download ใหม่');
+  }
+
+  const entries = set.items.map((item, index) => ({ name: buildMediaFilename(set.prefix, item, index), url: item.url }));
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${set.prefix}.zip"`);
+
+  try {
+    await streamZip(res, entries);
+    res.end();
+  } catch (err) {
+    console.error('ZIP stream error:', err.message);
+    res.destroy();
+  }
+});
+
+app.post('/api/merge', mergeLimiter, async (req, res) => {
   const { videoUrl, audioUrl, quality } = req.body;
   if (!videoUrl) return res.status(400).json({ error: 'videoUrl required' });
   if (typeof videoUrl !== 'string' || !isAllowedMediaUrl(videoUrl)) {
@@ -432,7 +709,7 @@ app.post('/api/merge', async (req, res) => {
   }
 });
 
-app.get('/api/download', async (req, res) => {
+app.get('/api/download', downloadLimiter, async (req, res) => {
   const { url, filename } = req.query;
   if (typeof url !== 'string' || !url) return res.status(400).send('url required');
 
@@ -477,6 +754,134 @@ function downloadFile(url, dest) {
       reject(err);
     }
   });
+}
+
+const ZIP_MAX_ENTRY_BYTES = 500 * 1024 * 1024;
+// Keeps every offset inside 32-bit ZIP fields, so no ZIP64 is needed.
+const ZIP_MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
+const ZIP_FLAGS = 0x0808; // data descriptor + UTF-8 names
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(crc, buf) {
+  let c = (crc ^ 0xffffffff) >>> 0;
+  for (let i = 0; i < buf.length; i++) c = CRC32_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function toDosDateTime(date) {
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    day: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+// STORE-only streaming ZIP; media is already compressed, and sizes go in data descriptors.
+async function streamZip(res, entries) {
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+
+  const write = chunk => new Promise((resolve, reject) => {
+    if (res.destroyed) return reject(new Error('Client disconnected'));
+    if (res.write(chunk)) return resolve();
+
+    const detach = () => {
+      res.off('drain', onDrain);
+      res.off('close', onClose);
+    };
+    const onDrain = () => { detach(); resolve(); };
+    const onClose = () => { detach(); reject(new Error('Client disconnected')); };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+  });
+
+  const { time, day } = toDosDateTime(new Date());
+  const central = [];
+  let offset = 0;
+  let total = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(ZIP_FLAGS, 6);
+    header.writeUInt16LE(0, 8);
+    header.writeUInt16LE(time, 10);
+    header.writeUInt16LE(day, 12);
+    header.writeUInt16LE(name.length, 26);
+    await write(Buffer.concat([header, name]));
+
+    const resp = await axios({
+      method: 'GET',
+      url: entry.url,
+      responseType: 'stream',
+      timeout: 90000,
+      headers: FB_HEADERS,
+      proxy: false,
+      maxRedirects: 5,
+      beforeRedirect: assertAllowedRedirect,
+      signal: controller.signal,
+    });
+
+    let crc = 0;
+    let size = 0;
+    for await (const chunk of resp.data) {
+      size += chunk.length;
+      total += chunk.length;
+      if (size > ZIP_MAX_ENTRY_BYTES || total > ZIP_MAX_TOTAL_BYTES) {
+        resp.data.destroy();
+        throw new Error('ZIP size limit exceeded');
+      }
+      crc = crc32(crc, chunk);
+      await write(chunk);
+    }
+
+    const descriptor = Buffer.alloc(16);
+    descriptor.writeUInt32LE(0x08074b50, 0);
+    descriptor.writeUInt32LE(crc, 4);
+    descriptor.writeUInt32LE(size, 8);
+    descriptor.writeUInt32LE(size, 12);
+    await write(descriptor);
+
+    central.push({ name, crc, size, offset });
+    offset += header.length + name.length + size + descriptor.length;
+  }
+
+  const centralStart = offset;
+  for (const item of central) {
+    const record = Buffer.alloc(46);
+    record.writeUInt32LE(0x02014b50, 0);
+    record.writeUInt16LE(20, 4);
+    record.writeUInt16LE(20, 6);
+    record.writeUInt16LE(ZIP_FLAGS, 8);
+    record.writeUInt16LE(0, 10);
+    record.writeUInt16LE(time, 12);
+    record.writeUInt16LE(day, 14);
+    record.writeUInt32LE(item.crc, 16);
+    record.writeUInt32LE(item.size, 20);
+    record.writeUInt32LE(item.size, 24);
+    record.writeUInt16LE(item.name.length, 28);
+    record.writeUInt32LE(item.offset, 42);
+    await write(Buffer.concat([record, item.name]));
+    offset += record.length + item.name.length;
+  }
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(central.length, 8);
+  end.writeUInt16LE(central.length, 10);
+  end.writeUInt32LE(offset - centralStart, 12);
+  end.writeUInt32LE(centralStart, 16);
+  await write(end);
 }
 
 function runFfmpeg(args) {

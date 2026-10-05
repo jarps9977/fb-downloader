@@ -1,4 +1,5 @@
 var currentStreams = [];
+var currentMedia = null;
 var pendingSourceUrl = '';
 
 async function analyzeUrl(event) {
@@ -36,8 +37,17 @@ async function analyzeUrl(event) {
 
     var data = await resp.json();
     if (!resp.ok) {
+      if (resp.status === 429) {
+        errorEl.textContent = data.error;
+        return;
+      }
       errorEl.textContent = '';
       showSourceFallback(url);
+      return;
+    }
+
+    if (data.kind === 'media') {
+      renderMediaSet(data);
       return;
     }
 
@@ -52,13 +62,67 @@ async function analyzeUrl(event) {
   }
 }
 
+function renderMediaSet(data) {
+  var items = data.items || [];
+  var resultsList = document.getElementById('results-list');
+  currentStreams = uniqueQualityStreams(data.streams || []);
+  currentMedia = data;
+  resultsList.innerHTML = '';
+  setResultsHeader('ไฟล์ทั้งหมด (' + items.length + ')', items.length > 0);
+
+  items.forEach(function(item, index) {
+    var isVideo = item.type === 'video';
+    var size = item.width && item.height ? ' · ' + item.width + '×' + item.height : '';
+    resultsList.appendChild(createResultItem(
+      (isVideo ? 'วิดีโอ ' : 'รูป ') + (index + 1),
+      isVideo ? 'badge-hd' : 'badge-fhd',
+      (isVideo ? 'MP4' : 'JPG') + size,
+      function(button) {
+        button.disabled = true;
+        downloadDirectUrl(item.url, item.filename);
+        markDownloadDone(button, 'Download สำเร็จ');
+      }
+    ));
+  });
+
+  // Video only available as DASH quality options; not part of the ZIP.
+  currentStreams.forEach(function(stream, index) {
+    resultsList.appendChild(createResultItem(
+      stream.label || 'Video',
+      getBadgeClass(stream.label),
+      'วิดีโอ (ไม่รวมใน ZIP)',
+      function(button) {
+        downloadStream(index, button);
+      }
+    ));
+  });
+
+  document.getElementById('results-section').hidden = items.length === 0 && currentStreams.length === 0;
+}
+
+function downloadMediaZip() {
+  if (!currentMedia) return;
+
+  var anchor = document.createElement('a');
+  anchor.href = '/api/media/zip?token=' + encodeURIComponent(currentMedia.token);
+  anchor.download = currentMedia.prefix + '.zip';
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+}
+
+function setResultsHeader(title, showZip) {
+  document.getElementById('results-title').textContent = title;
+  document.getElementById('zip-btn').hidden = !showZip;
+}
+
 function showSourceFallback(url) {
   pendingSourceUrl = url;
   updateViewSourceLink(url);
   var panel = document.getElementById('source-fallback');
   document.getElementById('source-input').value = '';
   panel.hidden = false;
-  document.getElementById('source-status').textContent = '';
+  document.getElementById('source-status').textContent = 'URL นี้ต้อง login: กด Copy Link แล้วเปิดใน browser ที่ login อยู่ copy source ทั้งหน้ามาวางด้านล่าง แล้วกด Show Download';
 }
 
 function hideSourceFallback() {
@@ -156,8 +220,13 @@ async function parseSourceInBackground(source, statusEl) {
     return;
   }
 
-  currentStreams = uniqueQualityStreams(data.streams || []);
   hideSourceFallback();
+  if (data.kind === 'media') {
+    renderMediaSet(data);
+    return;
+  }
+
+  currentStreams = uniqueQualityStreams(data.streams || []);
   renderResults(currentStreams);
 }
 
@@ -206,38 +275,51 @@ function renderResults(streams) {
   var resultsSection = document.getElementById('results-section');
   var resultsList = document.getElementById('results-list');
   resultsList.innerHTML = '';
+  currentMedia = null;
+  setResultsHeader('เลือกความคมชัด', false);
 
   streams.forEach(function(stream, index) {
-    var item = document.createElement('article');
-    item.className = 'result-item';
-
-    var meta = document.createElement('div');
-    meta.className = 'result-meta';
-
-    var badge = document.createElement('span');
-    badge.className = 'quality-badge ' + getBadgeClass(stream.label);
-    badge.textContent = stream.label || 'Video';
-
-    var detail = document.createElement('p');
-    detail.textContent = stream.isDash ? 'ไฟล์วิดีโอ' : 'ไฟล์ MP4 พร้อมดาวน์โหลด';
-
-    meta.appendChild(badge);
-    meta.appendChild(detail);
-
-    var button = document.createElement('button');
-    button.className = 'btn-download';
-    button.type = 'button';
-    button.textContent = 'Download';
-    button.onclick = function() {
-      downloadStream(index, button);
-    };
-
-    item.appendChild(meta);
-    item.appendChild(button);
-    resultsList.appendChild(item);
+    resultsList.appendChild(createResultItem(
+      stream.label || 'Video',
+      getBadgeClass(stream.label),
+      stream.isDash ? 'ไฟล์วิดีโอ' : 'ไฟล์ MP4 พร้อมดาวน์โหลด',
+      function(button) {
+        downloadStream(index, button);
+      }
+    ));
   });
 
   resultsSection.hidden = streams.length === 0;
+}
+
+function createResultItem(badgeText, badgeClass, detailText, onDownload) {
+  var item = document.createElement('article');
+  item.className = 'result-item';
+
+  var meta = document.createElement('div');
+  meta.className = 'result-meta';
+
+  var badge = document.createElement('span');
+  badge.className = 'quality-badge ' + badgeClass;
+  badge.textContent = badgeText;
+
+  var detail = document.createElement('p');
+  detail.textContent = detailText;
+
+  meta.appendChild(badge);
+  meta.appendChild(detail);
+
+  var button = document.createElement('button');
+  button.className = 'btn-download';
+  button.type = 'button';
+  button.textContent = 'Download';
+  button.onclick = function() {
+    onDownload(button);
+  };
+
+  item.appendChild(meta);
+  item.appendChild(button);
+  return item;
 }
 
 function getBadgeClass(label) {
@@ -345,6 +427,8 @@ function setStatusMessage(button, message, isError) {
 
 function resetResults(clearInput) {
   currentStreams = [];
+  currentMedia = null;
+  setResultsHeader('เลือกความคมชัด', false);
   document.getElementById('results-list').innerHTML = '';
   document.getElementById('results-section').hidden = true;
   if (clearInput !== false) {
