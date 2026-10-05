@@ -349,11 +349,14 @@ app.post('/api/parse', parseLimiter, requireAccessKey, sourceJson, async (req, r
 
 // iOS Shortcut entry point: always 200 so the Shortcut can branch on `files` or `message`.
 app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (req, res) => {
-  const { url, source } = req.body || {};
-  const hasSource = typeof source === 'string' && source.length > 0;
+  const { url, source: rawSource } = req.body || {};
+  // Shortcuts may turn JSON-looking text into a Dictionary before sending it.
+  const source = typeof rawSource === 'string' ? rawSource : rawSource && typeof rawSource === 'object' ? JSON.stringify(rawSource) : '';
+  const hasSource = source.length > 0;
   const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
   if (!hasSource && !hasUrl) {
-    return res.json({ message: 'แชร์ลิงก์ Facebook / Instagram หรือรันจาก Safari' });
+    const received = `source=${rawSource === undefined ? 'none' : typeof rawSource}, url=${url === undefined ? 'none' : typeof url}`;
+    return res.json({ message: `แชร์ลิงก์ Facebook / Instagram หรือรันจาก Safari (${received})` });
   }
 
   let media = null;
