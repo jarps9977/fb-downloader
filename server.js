@@ -109,6 +109,13 @@ function validateSupportedUrl(url) {
   return /^https?:\/\/([^/]+\.)?(facebook\.com|fb\.watch|instagram\.com|tiktok\.com)\//i.test(url || '');
 }
 
+// Mobile ("reflow") TikTok pages carry only a cookie-bound 540p playAddr, no bitrateInfo.
+function isTiktokMobileSource(source) {
+  return source.includes('webapp.reflow') && !source.includes('bitrateInfo');
+}
+
+const TIKTOK_DESKTOP_HINT = 'TikTok บนมือถือไม่มีไฟล์ให้โหลด: ใน Safari กด ≡ > Website Settings > เปิด Request Desktop Website แล้วกด Share > Shortcut นี้อีกครั้ง';
+
 function isTiktokUrl(url) {
   return /^https?:\/\/([^/]+\.)?tiktok\.com\//i.test(url || '');
 }
@@ -364,7 +371,7 @@ app.post('/api/parse', parseLimiter, requireAccessKey, sourceJson, async (req, r
 
   if (streams.length === 0) {
     return res.status(404).json({
-      error: 'ไม่พบ video URL ใน source นี้',
+      error: isTiktokMobileSource(source) ? 'TikTok หน้ามือถือไม่มีไฟล์ให้โหลด: ใช้ Page Source จากหน้า desktop' : 'ไม่พบ video URL ใน source นี้',
       diagnostics: analyzeSourceDiagnostics(source),
     });
   }
@@ -403,7 +410,9 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
   }
 
   if (!media) {
-    if (hasSource) return res.json({ message: 'ไม่พบรูปหรือวิดีโอในหน้านี้ ตรวจว่า login ใน Safari แล้ว' });
+    if (hasSource) {
+      return res.json({ message: isTiktokMobileSource(source) ? TIKTOK_DESKTOP_HINT : 'ไม่พบรูปหรือวิดีโอในหน้านี้ ตรวจว่า login ใน Safari แล้ว' });
+    }
     // x-safari-https (iOS 17+) opens Safari directly and skips the app's universal link.
     const target = new URL(url);
     target.protocol = 'https:';
