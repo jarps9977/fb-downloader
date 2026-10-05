@@ -350,8 +350,7 @@ app.post('/api/parse', parseLimiter, requireAccessKey, sourceJson, async (req, r
 // iOS Shortcut entry point: always 200 so the Shortcut can branch on `files` or `message`.
 app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (req, res) => {
   const { url, source: rawSource } = req.body || {};
-  // Shortcuts may turn JSON-looking text into a Dictionary before sending it.
-  const source = typeof rawSource === 'string' ? rawSource : rawSource && typeof rawSource === 'object' ? JSON.stringify(rawSource) : '';
+  const source = normalizeShortcutSource(rawSource);
   const hasSource = source.length > 0;
   const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
   if (!hasSource && !hasUrl) {
@@ -397,6 +396,19 @@ app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (
     summary: `บันทึกแล้ว ${media.items.map(item => describeMediaQuality(forIos(item))).join(', ')}`,
   });
 });
+
+// Shortcuts strips HTML-looking text to plain text, so the Shortcut wraps pages as {"html": ...};
+// it may also turn JSON text into a Dictionary before sending it.
+function normalizeShortcutSource(raw) {
+  let value = raw;
+  if (typeof value === 'string' && value.startsWith('{"html":')) {
+    try {
+      value = JSON.parse(value);
+    } catch {}
+  }
+  if (value && typeof value === 'object') return typeof value.html === 'string' ? value.html : JSON.stringify(value);
+  return typeof value === 'string' ? value : '';
+}
 
 function describeMediaQuality(item) {
   if (item.type === 'video') {
