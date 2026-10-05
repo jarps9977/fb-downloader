@@ -1,4 +1,35 @@
 var currentStreams = [];
+var currentStreamToken = null;
+var ACCESS_KEY_STORAGE = 'accessKey';
+
+function readAccessKey() {
+  try {
+    return localStorage.getItem(ACCESS_KEY_STORAGE) || '';
+  } catch (err) {
+    return '';
+  }
+}
+
+// Asks for the key once on 401 and remembers it in this browser.
+async function apiPost(url, body) {
+  var send = function(key) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Access-Key': key },
+      body: JSON.stringify(body)
+    });
+  };
+
+  var resp = await send(readAccessKey());
+  if (resp.status !== 401) return resp;
+
+  var key = window.prompt('ใส่ Access Key');
+  if (!key) return resp;
+  try {
+    localStorage.setItem(ACCESS_KEY_STORAGE, key);
+  } catch (err) {}
+  return send(key);
+}
 var currentMedia = null;
 var pendingSourceUrl = '';
 
@@ -29,15 +60,11 @@ async function analyzeUrl(event) {
   showLoading('กำลังดึงข้อมูล...');
 
   try {
-    var resp = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url })
-    });
+    var resp = await apiPost('/api/analyze', { url: url });
 
     var data = await resp.json();
     if (!resp.ok) {
-      if (resp.status === 429) {
+      if (resp.status === 429 || resp.status === 401) {
         errorEl.textContent = data.error;
         return;
       }
@@ -51,7 +78,8 @@ async function analyzeUrl(event) {
       return;
     }
 
-    currentStreams = uniqueQualityStreams(data.streams || []);
+    currentStreams = data.streams || [];
+    currentStreamToken = data.streamToken || null;
     renderResults(currentStreams);
   } catch (err) {
     errorEl.textContent = 'เชื่อมต่อ server ไม่ได้ กรุณารัน npm start แล้วลองใหม่';
@@ -65,7 +93,8 @@ async function analyzeUrl(event) {
 function renderMediaSet(data) {
   var items = data.items || [];
   var resultsList = document.getElementById('results-list');
-  currentStreams = uniqueQualityStreams(data.streams || []);
+  currentStreams = data.streams || [];
+  currentStreamToken = data.streamToken || null;
   currentMedia = data;
   resultsList.innerHTML = '';
   setResultsHeader('ไฟล์ทั้งหมด (' + items.length + ')', items.length > 0);
@@ -353,11 +382,7 @@ async function parseSourceFromTextarea() {
 }
 
 async function parseSourceInBackground(source, statusEl) {
-  var resp = await fetch('/api/parse', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: source })
-  });
+  var resp = await apiPost('/api/parse', { source: source });
 
   var data = await resp.json();
   if (!resp.ok) {
@@ -371,7 +396,8 @@ async function parseSourceInBackground(source, statusEl) {
     return;
   }
 
-  currentStreams = uniqueQualityStreams(data.streams || []);
+  currentStreams = data.streams || [];
+  currentStreamToken = data.streamToken || null;
   renderResults(currentStreams);
 }
 
@@ -387,33 +413,6 @@ function formatParseError(data) {
   ].join(', ');
 
   return (data.error || 'source นี้ยังไม่พบวิดีโอ') + ' | ' + data.diagnostics.hint + ' | ' + important;
-}
-
-function uniqueQualityStreams(streams) {
-  var wanted = [2160, 1440, 1080, 720, 480, 360];
-  var byQuality = {};
-
-  streams.forEach(function(stream) {
-    var quality = Number(stream.quality || 0);
-    if (!wanted.includes(quality)) return;
-
-    var existing = byQuality[quality];
-    if (!existing) {
-      byQuality[quality] = stream;
-      return;
-    }
-
-    if (!existing.isDash && stream.isDash) return;
-    if ((stream.audioUrl && !existing.audioUrl) || (stream.url && !existing.url)) {
-      byQuality[quality] = stream;
-    }
-  });
-
-  return wanted.filter(function(quality) {
-    return byQuality[quality];
-  }).map(function(quality) {
-    return byQuality[quality];
-  });
 }
 
 function renderResults(streams) {
@@ -496,71 +495,14 @@ function getBadgeClass(label) {
 }
 
 function downloadStream(index, button) {
-  var stream = currentStreams[index];
-  if (!stream) return;
+  if (!currentStreams[index] || !currentStreamToken) return;
 
-  if (stream.isDash) {
-    downloadDash(stream, button);
-    return;
-  }
-
-  button.disabled = true;
-  button.textContent = 'Downloading...';
-  var filename = 'fb_video_' + safeName(stream.label || 'video') + '.mp4';
-  downloadDirectUrl(stream.url, filename);
-  markDownloadDone(button, 'Download สำเร็จ');
-}
-
-async function downloadDash(stream, button) {
-  button.disabled = true;
-  button.textContent = 'Merging...';
-  showLoading('กำลังรวมไฟล์วิดีโอความคมชัดสูง...');
-
-  try {
-    var resp = await fetch('/api/merge', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        videoUrl: stream.url,
-        audioUrl: stream.audioUrl || null,
-        quality: stream.label || 'video'
-      })
-    });
-
-    if (!resp.ok) {
-      var err = await resp.json();
-      if (err.canDownloadVideoOnly && err.fallbackUrl) {
-        downloadDirectUrl(err.fallbackUrl, 'fb_video_' + safeName((err.fallbackLabel || stream.label || 'video') + '_video_only') + '.mp4');
-        markDownloadDone(button, 'Download สำเร็จ');
-        return;
-      }
-      markDownloadDone(button, err.error || 'Download ไม่สำเร็จ', true);
-      return;
-    }
-
-    var blob = await resp.blob();
-    var objectUrl = URL.createObjectURL(blob);
-    var anchor = document.createElement('a');
-    anchor.href = objectUrl;
-    anchor.download = 'fb_video_' + safeName(stream.label || 'video') + '.mp4';
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(objectUrl);
-  } catch (err) {
-    markDownloadDone(button, 'Download ไม่สำเร็จ: ' + err.message, true);
-  } finally {
-    hideLoading();
-  }
-}
-
-function downloadDirectUrl(url, filename) {
   var anchor = document.createElement('a');
-  anchor.href = '/api/download?url=' + encodeURIComponent(url) + '&filename=' + encodeURIComponent(filename || 'fb_video.mp4');
-  anchor.download = filename || 'fb_video.mp4';
+  anchor.href = '/api/media/file?token=' + encodeURIComponent(currentStreamToken) + '&index=' + index;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
+  markDownloadDone(button, currentStreams[index].isDash ? 'กำลังรวมไฟล์ที่ server อาจใช้เวลาสักครู่' : 'Download สำเร็จ');
 }
 
 function markDownloadDone(button, message, isError) {
@@ -585,6 +527,7 @@ function setStatusMessage(button, message, isError) {
 
 function resetResults(clearInput) {
   currentStreams = [];
+  currentStreamToken = null;
   currentMedia = null;
   setResultsHeader('เลือกความคมชัด', false);
   document.getElementById('results-list').innerHTML = '';
@@ -596,10 +539,6 @@ function resetResults(clearInput) {
     updateViewSourceLink('');
     hideSourceFallback();
   }
-}
-
-function safeName(value) {
-  return String(value).replace(/[^a-z0-9]/gi, '_');
 }
 
 function showLoading(text) {

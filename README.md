@@ -64,6 +64,10 @@ For iOS, `view-source:` may not work directly. Use Safari Web Inspector or a Sho
 - In Safari, the results header shows `บันทึกลง Photos`. Tap once to prepare the files, then tap again to open the share sheet and choose Save Image / Save Video.
 - iOS Shortcut: share a link from the Facebook / Instagram app. The Shortcut calls `POST /api/shortcut` and saves each returned file to the Photo Album, then shows `summary` (for example `วิดีโอ 1080p, รูป 1440×1800`). If the link needs login, the response includes `safariUrl` (an `x-safari-https://` link, iOS 17+), which opens the link directly in Safari. `fallbackUrl` (`/go.html`) shows a copyable link for older iOS. Share from Safari to the same Shortcut, and it sends `document.documentElement.outerHTML` as `source`.
 
+## Access Key
+
+Set `ACCESS_KEY` in the host's environment (Render: Environment > Add Environment Variable) to require it on `/api/analyze`, `/api/parse` and `/api/shortcut`. Clients send it in the `X-Access-Key` header: the web page asks once and remembers it in the browser, and the iOS Shortcut needs the header in both `Get Contents of URL` calls to `/api/shortcut`. Without `ACCESS_KEY`, those endpoints stay open. `/api/media/*` only serves files behind the short-lived tokens those endpoints issue.
+
 ## Deployment
 
 This is an Express app, so it needs Node hosting. Static-only hosts such as GitHub Pages will not run the backend.
@@ -73,6 +77,8 @@ Recommended free/low-cost options:
 - Render Web Service
 - Railway
 - Koyeb
+
+`.github/workflows/keepalive.yml` pings `/healthz` every 10 minutes so the Render free instance does not sleep. GitHub pauses scheduled workflows after 60 days without repo activity.
 
 The repo includes a `Dockerfile` (Node 20 + `ffmpeg`). On Render, create the Web Service with Language `Docker`. The repo also includes `nixpacks.toml` for platforms that use Nixpacks.
 

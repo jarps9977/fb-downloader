@@ -18,14 +18,25 @@ app.set('trust proxy', 1);
 
 const analyzeLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 const parseLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
-const downloadLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
-const mergeLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 const zipLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 // One media set loads up to 50 thumbnails, and video seeking issues extra range requests.
 const previewLimiter = createRateLimiter({ windowMs: 60_000, max: 300 });
 const fileLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
 const sizesLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
 const shortcutLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
+
+const ACCESS_KEY = process.env.ACCESS_KEY || '';
+if (!ACCESS_KEY) console.warn('ACCESS_KEY is not set: analyze/parse/shortcut endpoints are open to anyone');
+
+// Guards endpoints that fetch or parse; /api/media/* is already gated by unguessable tokens they issue.
+function requireAccessKey(req, res, next) {
+  if (!ACCESS_KEY) return next();
+  const hash = value => crypto.createHash('sha256').update(String(value)).digest();
+  if (crypto.timingSafeEqual(hash(req.get('x-access-key') || ''), hash(ACCESS_KEY))) return next();
+  res.status(401).json({ error: 'Access Key ไม่ถูกต้อง', message: 'Access Key ไม่ถูกต้อง: ตรวจ header X-Access-Key ใน Shortcut' });
+}
+
+app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
 // In-memory fixed window per IP; fine for a single instance, resets on restart.
 function createRateLimiter({ windowMs, max }) {
@@ -287,7 +298,7 @@ async function analyzeRemoteUrl(url, cookies) {
   return { media: null, streams: null, finalUrl: null, attempts };
 }
 
-app.post('/api/analyze', analyzeLimiter, async (req, res) => {
+app.post('/api/analyze', analyzeLimiter, requireAccessKey, async (req, res) => {
   const { url } = req.body;
   const cookies = req.body.cookies || process.env.FB_COOKIE || '';
   if (!url) return res.status(400).json({ error: 'กรุณาใส่ URL' });
@@ -298,7 +309,7 @@ app.post('/api/analyze', analyzeLimiter, async (req, res) => {
   try {
     const { media, streams, finalUrl, attempts } = await analyzeRemoteUrl(url, cookies);
     if (media) return res.json({ ...buildMediaResponse(media, streams), finalUrl });
-    if (streams) return res.json({ streams, finalUrl });
+    if (streams) return res.json({ ...buildStreamsResponse(streams), finalUrl });
 
     return res.status(404).json({
       error: cookies
@@ -314,7 +325,7 @@ app.post('/api/analyze', analyzeLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/parse', parseLimiter, async (req, res) => {
+app.post('/api/parse', parseLimiter, requireAccessKey, async (req, res) => {
   const { source } = req.body;
   if (typeof source !== 'string' || !source) return res.status(400).json({ error: 'No source provided' });
 
@@ -331,11 +342,11 @@ app.post('/api/parse', parseLimiter, async (req, res) => {
     });
   }
 
-  res.json({ streams });
+  res.json(buildStreamsResponse(streams));
 });
 
 // iOS Shortcut entry point: always 200 so the Shortcut can branch on `files` or `message`.
-app.post('/api/shortcut', shortcutLimiter, async (req, res) => {
+app.post('/api/shortcut', shortcutLimiter, requireAccessKey, async (req, res) => {
   const { url, source } = req.body || {};
   const hasSource = typeof source === 'string' && source.length > 0;
   const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
@@ -810,7 +821,44 @@ function buildMediaResponse(set, streams) {
       hasPreview: !!item.previewUrl,
     })),
     // DASH-only videos are not in the JSON payloads; keep the quality list as a fallback.
-    streams: hasVideo ? [] : streams,
+    ...(hasVideo ? { streams: [] } : buildStreamsResponse(streams)),
+  };
+}
+
+const STREAM_QUALITIES = [2160, 1440, 1080, 720, 480, 360];
+
+// One stream per quality, preferring DASH with audio; CDN URLs stay server-side behind a token.
+function buildStreamsResponse(streams) {
+  const byQuality = new Map();
+  for (const stream of streams) {
+    if (!STREAM_QUALITIES.includes(stream.quality) || !isAllowedMediaUrl(stream.url)) continue;
+    const audioUrl = stream.audioUrl && isAllowedMediaUrl(stream.audioUrl) ? stream.audioUrl : null;
+    const candidate = { ...stream, audioUrl };
+    const existing = byQuality.get(stream.quality);
+    if (!existing || (!existing.isDash && candidate.isDash) || (candidate.audioUrl && !existing.audioUrl)) {
+      byQuality.set(stream.quality, candidate);
+    }
+  }
+
+  const selected = STREAM_QUALITIES.filter(quality => byQuality.has(quality)).map(quality => byQuality.get(quality));
+  if (selected.length === 0) return { streams: [] };
+
+  const items = selected.map(stream => ({
+    type: 'video',
+    url: stream.url,
+    width: null,
+    height: null,
+    progressiveQuality: 0,
+    dash: stream.isDash && stream.audioUrl ? { videoUrl: stream.url, audioUrl: stream.audioUrl, quality: stream.quality } : null,
+  }));
+  return {
+    streamToken: storeMediaSet({ prefix: 'video', items }),
+    streams: selected.map(stream => ({
+      label: stream.label,
+      quality: stream.quality,
+      isDash: stream.isDash,
+      hasAudio: !stream.isDash || !!stream.audioUrl,
+    })),
   };
 }
 
@@ -1039,74 +1087,6 @@ app.get('/api/media/zip', zipLimiter, async (req, res) => {
   } catch (err) {
     console.error('ZIP stream error:', err.message);
     res.destroy();
-  }
-});
-
-app.post('/api/merge', mergeLimiter, async (req, res) => {
-  const { videoUrl, audioUrl, quality } = req.body;
-  if (!videoUrl) return res.status(400).json({ error: 'videoUrl required' });
-  if (typeof videoUrl !== 'string' || !isAllowedMediaUrl(videoUrl)) {
-    return res.status(400).json({ error: 'videoUrl not allowed' });
-  }
-  if (audioUrl && (typeof audioUrl !== 'string' || !isAllowedMediaUrl(audioUrl))) {
-    return res.status(400).json({ error: 'audioUrl not allowed' });
-  }
-
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fbdl-'));
-
-  try {
-    const outPath = await mergeDashToFile(videoUrl, audioUrl || null, tmpDir);
-
-    const filename = `fb_video_${String(quality || 'video').replace(/[^a-z0-9]/gi, '_')}.mp4`;
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'video/mp4');
-
-    const stream = fs.createReadStream(outPath);
-    stream.pipe(res);
-    stream.on('close', () => cleanup(tmpDir));
-    stream.on('error', () => cleanup(tmpDir));
-  } catch (err) {
-    cleanup(tmpDir);
-    res.status(500).json({
-      error: 'ffmpeg merge failed: ' + err.message,
-      fallbackUrl: videoUrl,
-      fallbackAudioUrl: audioUrl || null,
-      fallbackLabel: quality || 'video',
-      canDownloadVideoOnly: true,
-    });
-  }
-});
-
-app.get('/api/download', downloadLimiter, async (req, res) => {
-  const { url, filename } = req.query;
-  if (typeof url !== 'string' || !url) return res.status(400).send('url required');
-
-  let targetUrl;
-  try {
-    targetUrl = decodeURIComponent(url);
-  } catch {
-    return res.status(400).send('Invalid url');
-  }
-  if (!isAllowedMediaUrl(targetUrl)) return res.status(400).send('URL not allowed');
-
-  try {
-    const resp = await axios({
-      method: 'GET',
-      url: targetUrl,
-      responseType: 'stream',
-      timeout: 120000,
-      headers: { ...FB_HEADERS },
-      proxy: false,
-      maxRedirects: 5,
-      beforeRedirect: assertAllowedRedirect,
-    });
-
-    res.setHeader('Content-Disposition', `attachment; filename="${filename || 'fb_video.mp4'}"`);
-    res.setHeader('Content-Type', resp.headers['content-type'] || 'video/mp4');
-    if (resp.headers['content-length']) res.setHeader('Content-Length', resp.headers['content-length']);
-    resp.data.pipe(res);
-  } catch (err) {
-    res.status(500).send('Download failed: ' + err.message);
   }
 });
 
