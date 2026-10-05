@@ -8,7 +8,9 @@ const os = require('os');
 const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: '80mb' }));
+// Page sources run 2-4MB; only source-accepting routes get the large limit, parsed after the key check.
+const smallJson = express.json({ limit: '16kb' });
+const sourceJson = express.json({ limit: '10mb' });
 app.use(express.static(path.join(__dirname, 'public')));
 
 loadLocalEnv();
@@ -298,9 +300,9 @@ async function analyzeRemoteUrl(url, cookies) {
   return { media: null, streams: null, finalUrl: null, attempts };
 }
 
-app.post('/api/analyze', analyzeLimiter, requireAccessKey, async (req, res) => {
-  const { url } = req.body;
-  const cookies = req.body.cookies || process.env.FB_COOKIE || '';
+app.post('/api/analyze', analyzeLimiter, requireAccessKey, smallJson, async (req, res) => {
+  const { url } = req.body || {};
+  const cookies = req.body?.cookies || process.env.FB_COOKIE || '';
   if (!url) return res.status(400).json({ error: 'กรุณาใส่ URL' });
   if (!validateSupportedUrl(url)) {
     return res.status(400).json({ error: 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น' });
@@ -325,8 +327,8 @@ app.post('/api/analyze', analyzeLimiter, requireAccessKey, async (req, res) => {
   }
 });
 
-app.post('/api/parse', parseLimiter, requireAccessKey, async (req, res) => {
-  const { source } = req.body;
+app.post('/api/parse', parseLimiter, requireAccessKey, sourceJson, async (req, res) => {
+  const { source } = req.body || {};
   if (typeof source !== 'string' || !source) return res.status(400).json({ error: 'No source provided' });
 
   const streams = await getStreamsFromSource(source);
@@ -346,7 +348,7 @@ app.post('/api/parse', parseLimiter, requireAccessKey, async (req, res) => {
 });
 
 // iOS Shortcut entry point: always 200 so the Shortcut can branch on `files` or `message`.
-app.post('/api/shortcut', shortcutLimiter, requireAccessKey, async (req, res) => {
+app.post('/api/shortcut', shortcutLimiter, requireAccessKey, sourceJson, async (req, res) => {
   const { url, source } = req.body || {};
   const hasSource = typeof source === 'string' && source.length > 0;
   const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
@@ -1271,6 +1273,15 @@ function cleanup(dir) {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch {}
 }
+
+// JSON errors (oversized or malformed bodies) without stack traces; `message` keeps the Shortcut readable.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  const error = status === 413 ? 'ข้อมูลใหญ่เกินไป' : status === 400 ? 'ข้อมูลไม่ถูกต้อง' : 'เกิดข้อผิดพลาดที่ server';
+  if (status >= 500) console.error('Unhandled error:', err.message);
+  res.status(status).json({ error, message: error });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FB Downloader Pro -> http://localhost:${PORT}`));
