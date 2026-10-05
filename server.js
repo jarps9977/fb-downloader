@@ -368,17 +368,17 @@ app.post('/api/shortcut', shortcutLimiter, async (req, res) => {
   }
 
   const token = storeMediaSet(media);
-  const base = `${req.protocol}://${req.get('host')}/api/media/file?token=${token}&index=`;
+  const base = `${req.protocol}://${req.get('host')}/api/media/file?ios=1&token=${token}&index=`;
   res.json({
     files: media.items.map((_, index) => base + index),
-    summary: `บันทึกแล้ว ${media.items.map(describeMediaQuality).join(', ')}`,
+    summary: `บันทึกแล้ว ${media.items.map(item => describeMediaQuality(forIos(item))).join(', ')}`,
   });
 });
 
 function describeMediaQuality(item) {
   if (item.type === 'video') {
-    const shortSide = item.dash?.quality || Math.min(item.width || 0, item.height || 0);
-    return shortSide ? `วิดีโอ ${shortSide}p` : 'วิดีโอ (SD)';
+    const shortSide = item.dash?.quality || item.progressiveQuality;
+    return shortSide ? `วิดีโอ ${shortSide}p` : 'วิดีโอ';
   }
   return item.width && item.height ? `รูป ${item.width}×${item.height}` : 'รูป';
 }
@@ -592,19 +592,36 @@ function pickBestDashVideo(streams) {
 }
 
 // Progressive files usually cap around 720p; upgrade to the DASH rendition when it is sharper.
-async function resolveDashUpgrade(item, manifest) {
-  try {
-    const best = pickBestDashVideo(await parseDash(manifest));
+// iOS Photos rejects VP9/AV1 even inside MP4.
+const IOS_VIDEO_CODEC_PATTERN = /^(avc1|avc3|hvc1|hev1)/i;
+
+// Returns the best overall upgrade and the best one iOS Photos can import.
+async function resolveDashUpgrades(item, manifest) {
+  const toUpgrade = streams => {
+    const best = pickBestDashVideo(streams);
     if (!best || !best.audioUrl) return null;
     if (!isAllowedMediaUrl(best.url) || !isAllowedMediaUrl(best.audioUrl)) return null;
 
     // Equal resolution keeps the progressive file: it already has audio and is usually H.264.
     if ((best.quality || 0) <= (item.progressiveQuality || 0)) return null;
     return { videoUrl: best.url, audioUrl: best.audioUrl, quality: best.quality };
+  };
+
+  try {
+    const streams = await parseDash(manifest);
+    return {
+      dash: toUpgrade(streams),
+      dashIos: toUpgrade(streams.filter(stream => IOS_VIDEO_CODEC_PATTERN.test(stream.codecs || ''))),
+    };
   } catch (err) {
     console.error('DASH manifest parse error:', err.message);
-    return null;
+    return { dash: null, dashIos: null };
   }
+}
+
+// Progressive files are H.264, so dropping a non-iOS DASH upgrade is always importable.
+function forIos(item) {
+  return { ...item, dash: item.dashIos || null };
 }
 
 // Maps one JSON node in the IG v1, IG GraphQL or FB GraphQL shape to a media item.
@@ -754,7 +771,7 @@ async function extractMediaFromSource(source) {
   }
 
   for (const item of ctx.items) {
-    if (item.dashManifest) item.dash = await resolveDashUpgrade(item, item.dashManifest);
+    if (item.dashManifest) Object.assign(item, await resolveDashUpgrades(item, item.dashManifest));
     delete item.dashManifest;
   }
 
@@ -926,7 +943,7 @@ app.get('/api/media/file', fileLimiter, async (req, res) => {
 
   let opened;
   try {
-    opened = await openMediaItem(item);
+    opened = await openMediaItem(req.query.ios === '1' ? forIos(item) : item);
   } catch (err) {
     console.error('Media file error:', err.message);
     return res.status(502).send('ดาวน์โหลดไม่สำเร็จ กรุณาลองใหม่');

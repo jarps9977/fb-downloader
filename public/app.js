@@ -243,7 +243,8 @@ async function saveMediaToPhotos(button) {
   try {
     for (var i = 0; i < items.length; i++) {
       button.textContent = 'กำลังเตรียมไฟล์ ' + (i + 1) + '/' + items.length;
-      var resp = await fetch('/api/media/file?token=' + encodeURIComponent(token) + '&index=' + i);
+      // ios=1 skips VP9/AV1 renditions that Photos cannot import.
+      var resp = await fetch('/api/media/file?ios=1&token=' + encodeURIComponent(token) + '&index=' + i);
       if (!resp.ok) throw new Error(await resp.text());
       var blob = await resp.blob();
       var type = blob.type || (items[i].type === 'video' ? 'video/mp4' : 'image/jpeg');
