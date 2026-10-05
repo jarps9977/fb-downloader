@@ -206,6 +206,58 @@ function downloadMediaZip() {
 function setResultsHeader(title, showZip) {
   document.getElementById('results-title').textContent = title;
   document.getElementById('zip-btn').hidden = !showZip;
+
+  var photosBtn = document.getElementById('photos-btn');
+  photosBtn.hidden = !showZip || !canShareFiles();
+  photosBtn.textContent = 'บันทึกลง Photos';
+  preparedShareFiles = null;
+}
+
+var preparedShareFiles = null;
+
+function canShareFiles() {
+  try {
+    return !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'x.jpg', { type: 'image/jpeg' })] }));
+  } catch (err) {
+    return false;
+  }
+}
+
+// Safari drops the user gesture during long fetches, so prepare on the first tap and share on the second.
+async function saveMediaToPhotos(button) {
+  if (!currentMedia) return;
+
+  if (preparedShareFiles && preparedShareFiles.token === currentMedia.token) {
+    try {
+      await navigator.share({ files: preparedShareFiles.files });
+    } catch (err) {
+      if (err.name !== 'AbortError') alert('บันทึกไม่สำเร็จ: ' + err.message);
+    }
+    return;
+  }
+
+  var token = currentMedia.token;
+  var items = currentMedia.items;
+  var files = [];
+  button.disabled = true;
+  try {
+    for (var i = 0; i < items.length; i++) {
+      button.textContent = 'กำลังเตรียมไฟล์ ' + (i + 1) + '/' + items.length;
+      var resp = await fetch('/api/media/file?token=' + encodeURIComponent(token) + '&index=' + i);
+      if (!resp.ok) throw new Error(await resp.text());
+      var blob = await resp.blob();
+      var type = blob.type || (items[i].type === 'video' ? 'video/mp4' : 'image/jpeg');
+      files.push(new File([blob], items[i].filename, { type: type }));
+    }
+    if (!currentMedia || currentMedia.token !== token) return;
+    preparedShareFiles = { token: token, files: files };
+    button.textContent = 'แตะอีกครั้งเพื่อบันทึก';
+  } catch (err) {
+    button.textContent = 'บันทึกลง Photos';
+    alert('เตรียมไฟล์ไม่สำเร็จ: ' + err.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function showSourceFallback(url) {

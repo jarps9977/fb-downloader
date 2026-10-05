@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Open in Safari</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app-shell">
+  <section class="panel">
+    <h2>เปิดใน Safari</h2>
+    <p id="go-status">กำลังเปิดลิงก์...</p>
+    <p>เมื่อหน้าโหลดเสร็จ กด Share แล้วเลือก Shortcut เดิมอีกครั้ง</p>
+    <p>ถ้าแอปเด้งขึ้นมาแทน ให้วางลิงก์ (copy ไว้ให้แล้ว) ในช่อง address ของ Safari</p>
+  </section>
+</main>
+<script>
+  (function() {
+    var target = '';
+    try {
+      target = decodeURIComponent(location.hash.slice(1));
+    } catch (err) {}
+
+    // Only redirect to Facebook / Instagram to avoid an open redirect.
+    var allowed = false;
+    try {
+      var parsed = new URL(target);
+      allowed = parsed.protocol === 'https:' && /(^|\.)(facebook\.com|fb\.watch|instagram\.com)$/i.test(parsed.hostname);
+    } catch (err) {}
+
+    if (!allowed) {
+      document.getElementById('go-status').textContent = 'ลิงก์ไม่ถูกต้อง';
+      return;
+    }
+    // Script navigation stays in Safari instead of triggering the app's universal link.
+    location.replace(target);
+  })();
+</script>
+</body>
+</html>

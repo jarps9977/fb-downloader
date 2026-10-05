@@ -25,6 +25,7 @@ const zipLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 const previewLimiter = createRateLimiter({ windowMs: 60_000, max: 300 });
 const fileLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
 const sizesLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
+const shortcutLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
 // In-memory fixed window per IP; fine for a single instance, resets on restart.
 function createRateLimiter({ windowMs, max }) {
@@ -269,6 +270,23 @@ async function getStreamsFromSource(source) {
   return results.sort((a, b) => (b.quality || 0) - (a.quality || 0));
 }
 
+// Stops at the first candidate host that yields media items or direct streams.
+async function analyzeRemoteUrl(url, cookies) {
+  const attempts = [];
+  for (const candidateUrl of buildSourceCandidates(url)) {
+    const fetched = await fetchRemoteSource(candidateUrl, cookies);
+    const blocked = isLoginRedirect(fetched.finalUrl);
+    const source = typeof fetched.source === 'string' ? fetched.source : JSON.stringify(fetched.source || '');
+    const streams = blocked ? [] : await getStreamsFromSource(source);
+    const media = blocked ? { items: [] } : await extractMediaFromSource(source);
+    attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length, mediaCount: media.items.length });
+
+    if (media.items.length > 0) return { media, streams, finalUrl: fetched.finalUrl, attempts };
+    if (streams.length > 0) return { media: null, streams, finalUrl: fetched.finalUrl, attempts };
+  }
+  return { media: null, streams: null, finalUrl: null, attempts };
+}
+
 app.post('/api/analyze', analyzeLimiter, async (req, res) => {
   const { url } = req.body;
   const cookies = req.body.cookies || process.env.FB_COOKIE || '';
@@ -277,24 +295,10 @@ app.post('/api/analyze', analyzeLimiter, async (req, res) => {
     return res.status(400).json({ error: 'URL ต้องเป็น Facebook, fb.watch หรือ Instagram เท่านั้น' });
   }
 
-  const attempts = [];
-
   try {
-    for (const candidateUrl of buildSourceCandidates(url)) {
-      const fetched = await fetchRemoteSource(candidateUrl, cookies);
-      const blocked = isLoginRedirect(fetched.finalUrl);
-      const source = typeof fetched.source === 'string' ? fetched.source : JSON.stringify(fetched.source || '');
-      const streams = blocked ? [] : await getStreamsFromSource(source);
-      const media = blocked ? { items: [] } : await extractMediaFromSource(source);
-      attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length, mediaCount: media.items.length });
-
-      if (media.items.length > 0) {
-        return res.json({ ...buildMediaResponse(media, streams), finalUrl: fetched.finalUrl });
-      }
-      if (streams.length > 0) {
-        return res.json({ streams, finalUrl: fetched.finalUrl });
-      }
-    }
+    const { media, streams, finalUrl, attempts } = await analyzeRemoteUrl(url, cookies);
+    if (media) return res.json({ ...buildMediaResponse(media, streams), finalUrl });
+    if (streams) return res.json({ streams, finalUrl });
 
     return res.status(404).json({
       error: cookies
@@ -328,6 +332,41 @@ app.post('/api/parse', parseLimiter, async (req, res) => {
   }
 
   res.json({ streams });
+});
+
+// iOS Shortcut entry point: always 200 so the Shortcut can branch on `files` or `message`.
+app.post('/api/shortcut', shortcutLimiter, async (req, res) => {
+  const { url, source } = req.body || {};
+  const hasSource = typeof source === 'string' && source.length > 0;
+  const hasUrl = typeof url === 'string' && validateSupportedUrl(url);
+  if (!hasSource && !hasUrl) {
+    return res.json({ message: 'แชร์ลิงก์ Facebook / Instagram หรือรันจาก Safari' });
+  }
+
+  let media = null;
+  try {
+    if (hasSource) {
+      const extracted = await extractMediaFromSource(source);
+      if (extracted.items.length > 0) media = extracted;
+    } else {
+      media = (await analyzeRemoteUrl(url, process.env.FB_COOKIE || '')).media;
+    }
+  } catch (err) {
+    console.error('Shortcut analyze error:', err.message);
+  }
+
+  if (!media) {
+    if (hasSource) return res.json({ message: 'ไม่พบรูปหรือวิดีโอในหน้านี้ ตรวจว่า login ใน Safari แล้ว' });
+    // Fragment keeps the shared link out of server logs; go.html opens it in Safari.
+    return res.json({
+      message: 'ต้อง login: เปิดใน Safari แล้วกด Share > Shortcut นี้อีกครั้ง',
+      safariUrl: `${req.protocol}://${req.get('host')}/go.html#${encodeURIComponent(url)}`,
+    });
+  }
+
+  const token = storeMediaSet(media);
+  const base = `${req.protocol}://${req.get('host')}/api/media/file?token=${token}&index=`;
+  res.json({ files: media.items.map((_, index) => base + index) });
 });
 
 function analyzeSourceDiagnostics(source) {

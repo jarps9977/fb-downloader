@@ -59,6 +59,11 @@ Use this when a story requires login.
 
 For iOS, `view-source:` may not work directly. Use Safari Web Inspector or a Shortcut that copies page HTML/script content, then paste it into `Page Source`.
 
+### iOS: Save to Photos
+
+- In Safari, the results header shows `บันทึกลง Photos`. Tap once to prepare the files, then tap again to open the share sheet and choose Save Image / Save Video.
+- iOS Shortcut: share a link from the Facebook / Instagram app. The Shortcut calls `POST /api/shortcut` and saves each returned file to the Photo Album. If the link needs login, the response includes `safariUrl` (`/go.html`), which opens the link in Safari. Share from Safari to the same Shortcut, and it sends `document.documentElement.outerHTML` as `source`.
+
 ## Deployment
 
 This is an Express app, so it needs Node hosting. Static-only hosts such as GitHub Pages will not run the backend.
