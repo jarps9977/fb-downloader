@@ -94,6 +94,32 @@ function normalizeVideoUrl(url) {
     .replace(/\s/g, '');
 }
 
+const ALLOWED_MEDIA_HOST_SUFFIXES = ['fbcdn.net', 'cdninstagram.com'];
+
+function isAllowedMediaUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  if (parsed.port && parsed.port !== '443') return false;
+
+  const host = parsed.hostname.toLowerCase();
+  return ALLOWED_MEDIA_HOST_SUFFIXES.some(suffix => host === suffix || host.endsWith(`.${suffix}`));
+}
+
+// Re-check every redirect hop so an allowed CDN URL cannot bounce to an internal host.
+function assertAllowedRedirect(options) {
+  const port = options.port ? `:${options.port}` : '';
+  const target = `${options.protocol}//${options.hostname}${port}${options.path || '/'}`;
+  if (!isAllowedMediaUrl(target)) {
+    throw new Error('Redirect target not allowed');
+  }
+}
+
 async function fetchRemoteSource(url, cookies) {
   const headers = { ...FB_HEADERS };
   if (/instagram\.com/i.test(url)) {
@@ -365,6 +391,12 @@ function parseDashWithRegex(xml) {
 app.post('/api/merge', async (req, res) => {
   const { videoUrl, audioUrl, quality } = req.body;
   if (!videoUrl) return res.status(400).json({ error: 'videoUrl required' });
+  if (typeof videoUrl !== 'string' || !isAllowedMediaUrl(videoUrl)) {
+    return res.status(400).json({ error: 'videoUrl not allowed' });
+  }
+  if (audioUrl && (typeof audioUrl !== 'string' || !isAllowedMediaUrl(audioUrl))) {
+    return res.status(400).json({ error: 'audioUrl not allowed' });
+  }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fbdl-'));
   const videoPath = path.join(tmpDir, 'video.mp4');
@@ -402,16 +434,26 @@ app.post('/api/merge', async (req, res) => {
 
 app.get('/api/download', async (req, res) => {
   const { url, filename } = req.query;
-  if (!url) return res.status(400).send('url required');
+  if (typeof url !== 'string' || !url) return res.status(400).send('url required');
+
+  let targetUrl;
+  try {
+    targetUrl = decodeURIComponent(url);
+  } catch {
+    return res.status(400).send('Invalid url');
+  }
+  if (!isAllowedMediaUrl(targetUrl)) return res.status(400).send('URL not allowed');
 
   try {
     const resp = await axios({
       method: 'GET',
-      url: decodeURIComponent(url),
+      url: targetUrl,
       responseType: 'stream',
       timeout: 120000,
       headers: { ...FB_HEADERS },
       proxy: false,
+      maxRedirects: 5,
+      beforeRedirect: assertAllowedRedirect,
     });
 
     res.setHeader('Content-Disposition', `attachment; filename="${filename || 'fb_video.mp4'}"`);
@@ -426,7 +468,7 @@ app.get('/api/download', async (req, res) => {
 function downloadFile(url, dest) {
   return new Promise(async (resolve, reject) => {
     try {
-      const resp = await axios({ method: 'GET', url, responseType: 'stream', timeout: 90000, headers: FB_HEADERS, proxy: false });
+      const resp = await axios({ method: 'GET', url, responseType: 'stream', timeout: 90000, headers: FB_HEADERS, proxy: false, maxRedirects: 5, beforeRedirect: assertAllowedRedirect });
       const writer = fs.createWriteStream(dest);
       resp.data.pipe(writer);
       writer.on('finish', resolve);
