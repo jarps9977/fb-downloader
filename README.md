@@ -14,14 +14,15 @@ The app supports two workflows:
 - Generates a `view-source:` link from the URL you enter.
 - Parses direct MP4 URLs and DASH manifests.
 - Shows one download option per quality, such as `1080p`, `720p`, `480p`, and `360p`.
-- Downloads video-only files for DASH streams. Audio is intentionally ignored.
+- Picks the highest available resolution and merges DASH video + audio with `ffmpeg`.
+- Shows previews and downloads posts, stories, and carousels (images and videos) one by one or as a ZIP.
 
 ## Requirements
 
 - Node.js 18+
 - npm
 
-`ffmpeg` is optional. The current UI downloads video-only streams and does not require audio merging.
+`ffmpeg` is required for full-quality video. Facebook / Instagram serve 1080p+ only as separate DASH video and audio tracks, which the server merges with `ffmpeg -c copy` (no re-encode). Without `ffmpeg`, downloads fall back to the progressive file (usually 720p).
 
 ## Run Locally
 
@@ -68,7 +69,7 @@ Recommended free/low-cost options:
 - Railway
 - Koyeb
 
-The repo includes `nixpacks.toml` for platforms that use Nixpacks.
+The repo includes a `Dockerfile` (Node 20 + `ffmpeg`). On Render, create the Web Service with Language `Docker`. The repo also includes `nixpacks.toml` for platforms that use Nixpacks.
 
 ## Notes
 

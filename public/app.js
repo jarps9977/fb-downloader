@@ -70,20 +70,36 @@ function renderMediaSet(data) {
   resultsList.innerHTML = '';
   setResultsHeader('ไฟล์ทั้งหมด (' + items.length + ')', items.length > 0);
 
+  var detailEls = [];
   items.forEach(function(item, index) {
     var isVideo = item.type === 'video';
-    var size = item.width && item.height ? ' · ' + item.width + '×' + item.height : '';
-    resultsList.appendChild(createResultItem(
+    var size = item.quality
+      ? ' · ' + item.quality + 'p (รวมภาพ+เสียง)'
+      : (item.width && item.height ? ' · ' + item.width + '×' + item.height : '');
+    var row = createResultItem(
       (isVideo ? 'วิดีโอ ' : 'รูป ') + (index + 1),
       isVideo ? 'badge-hd' : 'badge-fhd',
       (isVideo ? 'MP4' : 'JPG') + size,
       function(button) {
         button.disabled = true;
-        downloadDirectUrl(item.url, item.filename);
-        markDownloadDone(button, 'Download สำเร็จ');
+        downloadMediaFile(index, item.filename);
+        markDownloadDone(button, item.quality ? 'กำลังรวมไฟล์ HD ที่ server อาจใช้เวลาสักครู่' : 'Download สำเร็จ');
+      },
+      {
+        src: item.hasPreview ? mediaPreviewUrl(index, false) : null,
+        isVideo: isVideo,
+        onOpen: function() {
+          openLightbox(index);
+        }
       }
-    ));
+    );
+    var detail = row.querySelector('.result-meta p');
+    detail.textContent += ' · กำลังคำนวณขนาด...';
+    detailEls.push({ el: detail, base: (isVideo ? 'MP4' : 'JPG') + size });
+    resultsList.appendChild(row);
   });
+
+  if (items.length > 0) loadMediaSizes(data.token, detailEls);
 
   // Video only available as DASH quality options; not part of the ZIP.
   currentStreams.forEach(function(stream, index) {
@@ -98,6 +114,82 @@ function renderMediaSet(data) {
   });
 
   document.getElementById('results-section').hidden = items.length === 0 && currentStreams.length === 0;
+}
+
+async function loadMediaSizes(token, detailEls) {
+  var sizes = [];
+  try {
+    var resp = await fetch('/api/media/sizes?token=' + encodeURIComponent(token));
+    if (resp.ok) sizes = (await resp.json()).sizes || [];
+  } catch (err) {}
+
+  // Results may have been replaced while sizes were loading.
+  if (!currentMedia || currentMedia.token !== token) return;
+
+  var total = 0;
+  detailEls.forEach(function(entry, index) {
+    var bytes = sizes[index];
+    if (bytes) total += bytes;
+    entry.el.textContent = entry.base + (bytes ? ' · ' + formatBytes(bytes) : '');
+  });
+
+  var title = document.getElementById('results-title');
+  if (total > 0) title.textContent = 'ไฟล์ทั้งหมด (' + detailEls.length + ') · ' + formatBytes(total);
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+
+function mediaPreviewUrl(index, full) {
+  return '/api/media/preview?token=' + encodeURIComponent(currentMedia.token) + '&index=' + index + (full ? '&full=1' : '');
+}
+
+function openLightbox(index) {
+  if (!currentMedia || !currentMedia.items[index]) return;
+
+  var item = currentMedia.items[index];
+  var body = document.getElementById('lightbox-body');
+  body.innerHTML = '';
+
+  var el = document.createElement(item.type === 'video' ? 'video' : 'img');
+  el.src = mediaPreviewUrl(index, true);
+  if (item.type === 'video') {
+    el.controls = true;
+    el.autoplay = true;
+    el.playsInline = true;
+  } else {
+    el.alt = item.filename || '';
+  }
+  body.appendChild(el);
+  document.getElementById('lightbox').hidden = false;
+}
+
+function closeLightbox(event) {
+  var lightbox = document.getElementById('lightbox');
+  if (event && event.target !== lightbox && !event.target.classList.contains('lightbox-close')) return;
+
+  // Clearing the node stops video playback and its range requests.
+  document.getElementById('lightbox-body').innerHTML = '';
+  lightbox.hidden = true;
+}
+
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape' && !document.getElementById('lightbox').hidden) {
+    document.getElementById('lightbox-body').innerHTML = '';
+    document.getElementById('lightbox').hidden = true;
+  }
+});
+
+function downloadMediaFile(index, filename) {
+  var anchor = document.createElement('a');
+  anchor.href = '/api/media/file?token=' + encodeURIComponent(currentMedia.token) + '&index=' + index;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
 }
 
 function downloadMediaZip() {
@@ -245,7 +337,7 @@ function formatParseError(data) {
 }
 
 function uniqueQualityStreams(streams) {
-  var wanted = [1080, 720, 480, 360];
+  var wanted = [2160, 1440, 1080, 720, 480, 360];
   var byQuality = {};
 
   streams.forEach(function(stream) {
@@ -282,7 +374,7 @@ function renderResults(streams) {
     resultsList.appendChild(createResultItem(
       stream.label || 'Video',
       getBadgeClass(stream.label),
-      stream.isDash ? 'ไฟล์วิดีโอ' : 'ไฟล์ MP4 พร้อมดาวน์โหลด',
+      stream.isDash ? 'รวมภาพ+เสียง (ไม่ลดคุณภาพ)' : 'ไฟล์ MP4 พร้อมดาวน์โหลด',
       function(button) {
         downloadStream(index, button);
       }
@@ -292,12 +384,32 @@ function renderResults(streams) {
   resultsSection.hidden = streams.length === 0;
 }
 
-function createResultItem(badgeText, badgeClass, detailText, onDownload) {
+function createResultItem(badgeText, badgeClass, detailText, onDownload, preview) {
   var item = document.createElement('article');
   item.className = 'result-item';
 
   var meta = document.createElement('div');
   meta.className = 'result-meta';
+
+  if (preview) {
+    var thumb = document.createElement('button');
+    thumb.type = 'button';
+    thumb.className = 'thumb' + (preview.isVideo ? ' is-video' : '');
+    thumb.setAttribute('aria-label', 'Preview ' + badgeText);
+    thumb.onclick = preview.onOpen;
+
+    if (preview.src) {
+      var img = document.createElement('img');
+      img.src = preview.src;
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onerror = function() {
+        img.remove();
+      };
+      thumb.appendChild(img);
+    }
+    meta.appendChild(thumb);
+  }
 
   var badge = document.createElement('span');
   badge.className = 'quality-badge ' + badgeClass;
@@ -335,7 +447,7 @@ function downloadStream(index, button) {
   if (!stream) return;
 
   if (stream.isDash) {
-    downloadVideoOnly(stream, button);
+    downloadDash(stream, button);
     return;
   }
 
@@ -343,13 +455,6 @@ function downloadStream(index, button) {
   button.textContent = 'Downloading...';
   var filename = 'fb_video_' + safeName(stream.label || 'video') + '.mp4';
   downloadDirectUrl(stream.url, filename);
-  markDownloadDone(button, 'Download สำเร็จ');
-}
-
-function downloadVideoOnly(stream, button) {
-  button.disabled = true;
-  button.textContent = 'Downloading...';
-  downloadDirectUrl(stream.url, 'fb_video_' + safeName(stream.label || 'video') + '.mp4');
   markDownloadDone(button, 'Download สำเร็จ');
 }
 

@@ -253,6 +253,77 @@ h2 {
   line-height: 1.4;
 }
 
+.thumb {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid #d9e2ec;
+  border-radius: 6px;
+  background: #eef2f7;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb.is-video::after {
+  content: "\25B6";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, .35);
+  color: #fff;
+  font-size: 18px;
+}
+
+#lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, .85);
+}
+
+#lightbox[hidden] {
+  display: none;
+}
+
+#lightbox-body img,
+#lightbox-body video {
+  display: block;
+  max-width: min(92vw, 1080px);
+  max-height: 86vh;
+  border-radius: 6px;
+  background: #000;
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  color: #1f2933;
+  font-size: 22px;
+  cursor: pointer;
+}
+
 .quality-badge {
   display: inline-flex;
   align-items: center;

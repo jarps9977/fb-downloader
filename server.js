@@ -21,6 +21,10 @@ const parseLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
 const downloadLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
 const mergeLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 const zipLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
+// One media set loads up to 50 thumbnails, and video seeking issues extra range requests.
+const previewLimiter = createRateLimiter({ windowMs: 60_000, max: 300 });
+const fileLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
+const sizesLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
 
 // In-memory fixed window per IP; fine for a single instance, resets on restart.
 function createRateLimiter({ windowMs, max }) {
@@ -281,7 +285,7 @@ app.post('/api/analyze', analyzeLimiter, async (req, res) => {
       const blocked = isLoginRedirect(fetched.finalUrl);
       const source = typeof fetched.source === 'string' ? fetched.source : JSON.stringify(fetched.source || '');
       const streams = blocked ? [] : await getStreamsFromSource(source);
-      const media = blocked ? { items: [] } : extractMediaFromSource(source);
+      const media = blocked ? { items: [] } : await extractMediaFromSource(source);
       attempts.push({ url: candidateUrl, finalUrl: fetched.finalUrl, streamCount: streams.length, mediaCount: media.items.length });
 
       if (media.items.length > 0) {
@@ -311,7 +315,7 @@ app.post('/api/parse', parseLimiter, async (req, res) => {
   if (typeof source !== 'string' || !source) return res.status(400).json({ error: 'No source provided' });
 
   const streams = await getStreamsFromSource(source);
-  const media = extractMediaFromSource(source);
+  const media = await extractMediaFromSource(source);
   if (media.items.length > 0) {
     return res.json(buildMediaResponse(media, streams));
   }
@@ -374,6 +378,7 @@ async function parseDash(xml) {
         const width = parseInt(rep?.$?.width || '0', 10);
         const bandwidth = parseInt(rep?.$?.bandwidth || '0', 10);
         const qualityLabel = rep?.$?.FBQualityLabel || '';
+        const codecs = rep?.$?.codecs || set?.$?.codecs || '';
         const quality = parseInt((qualityLabel.match(/\d+/) || [])[0] || Math.min(width || height, height || width) || '0', 10);
         const baseUrls = rep?.BaseURL || [];
 
@@ -384,7 +389,7 @@ async function parseDash(xml) {
           if (mimeType.includes('audio') || setType.includes('audio')) {
             audios.push({ url, bandwidth });
           } else if (mimeType.includes('video') || setType.includes('video')) {
-            videos.push({ url, height, width, bandwidth, qualityLabel, quality });
+            videos.push({ url, height, width, bandwidth, qualityLabel, quality, codecs });
           }
         }
       }
@@ -399,6 +404,8 @@ async function parseDash(xml) {
     audioUrl: bestAudio,
     label: video.qualityLabel || (video.quality ? `${video.quality}p` : `${Math.round((video.bandwidth || 0) / 1000)}kbps`),
     quality: video.quality || Math.round((video.bandwidth || 0) / 1000),
+    bandwidth: video.bandwidth || 0,
+    codecs: video.codecs || '',
     isDash: true,
   }));
 }
@@ -420,6 +427,7 @@ function parseDashWithRegex(xml) {
     const mimeType = getAttr('mimeType');
     const bandwidth = parseInt(getAttr('bandwidth') || '0', 10);
     const qualityLabel = getAttr('FBQualityLabel');
+    const codecs = getAttr('codecs');
     const width = parseInt(getAttr('width') || '0', 10);
     const height = parseInt(getAttr('height') || '0', 10);
     const quality = parseInt((qualityLabel.match(/\d+/) || [])[0] || Math.min(width || height, height || width) || '0', 10);
@@ -427,7 +435,7 @@ function parseDashWithRegex(xml) {
     if (mimeType.includes('audio')) {
       audios.push({ url, bandwidth });
     } else if (mimeType.includes('video')) {
-      videos.push({ url, bandwidth, qualityLabel, quality });
+      videos.push({ url, bandwidth, qualityLabel, quality, codecs });
     }
   }
 
@@ -439,6 +447,8 @@ function parseDashWithRegex(xml) {
     audioUrl: bestAudio,
     label: video.qualityLabel || (video.quality ? `${video.quality}p` : `${Math.round((video.bandwidth || 0) / 1000)}kbps`),
     quality: video.quality || Math.round((video.bandwidth || 0) / 1000),
+    bandwidth: video.bandwidth || 0,
+    codecs: video.codecs || '',
     isDash: true,
   }));
 }
@@ -499,11 +509,49 @@ function pickLargest(list, urlKey) {
   return valid.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)))[0];
 }
 
+// Smallest rendition that still looks sharp as a list thumbnail.
+function pickPreview(list, urlKey, minWidth = 320) {
+  const valid = (Array.isArray(list) ? list : []).filter(entry => entry && typeof entry[urlKey] === 'string');
+  if (valid.length === 0) return null;
+  const sorted = valid.sort((a, b) => (a.width || 0) - (b.width || 0));
+  return sorted.find(entry => (entry.width || 0) >= minWidth) || sorted[sorted.length - 1];
+}
+
 function getMediaChildren(node) {
   if (Array.isArray(node.carousel_media) && node.carousel_media.length > 0) return node.carousel_media;
   const edges = node.edge_sidecar_to_children?.edges;
   if (Array.isArray(edges) && edges.length > 0) return edges.map(edge => edge?.node).filter(Boolean);
   return null;
+}
+
+function asManifest(value) {
+  return typeof value === 'string' && value.includes('<MPD') ? value : null;
+}
+
+// Highest resolution first; on ties prefer H.264, which plays everywhere (VP9/AV1 in MP4 does not).
+function pickBestDashVideo(streams) {
+  const videos = streams.filter(stream => stream.isDash && stream.url);
+  if (videos.length === 0) return null;
+  return videos.sort((a, b) =>
+    (b.quality || 0) - (a.quality || 0)
+    || Number(/^avc1/i.test(b.codecs)) - Number(/^avc1/i.test(a.codecs))
+    || (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+}
+
+// Progressive files usually cap around 720p; upgrade to the DASH rendition when it is sharper.
+async function resolveDashUpgrade(item, manifest) {
+  try {
+    const best = pickBestDashVideo(await parseDash(manifest));
+    if (!best || !best.audioUrl) return null;
+    if (!isAllowedMediaUrl(best.url) || !isAllowedMediaUrl(best.audioUrl)) return null;
+
+    const progressiveQuality = Math.min(item.width || 0, item.height || 0);
+    if ((best.quality || 0) <= progressiveQuality) return null;
+    return { videoUrl: best.url, audioUrl: best.audioUrl, quality: best.quality };
+  } catch (err) {
+    console.error('DASH manifest parse error:', err.message);
+    return null;
+  }
 }
 
 // Maps one JSON node in the IG v1, IG GraphQL or FB GraphQL shape to a media item.
@@ -518,6 +566,8 @@ function mediaFromNode(node) {
         url: chosen.url,
         width: chosen.width || node.original_width || null,
         height: chosen.height || node.original_height || null,
+        previewUrl: pickPreview(node.image_versions2?.candidates, 'url')?.url || null,
+        dashManifest: video ? asManifest(node.video_dash_manifest) : null,
         code: node.code,
       };
     }
@@ -533,18 +583,36 @@ function mediaFromNode(node) {
       url: isVideo ? node.video_url : (pickLargest(resources, 'url')?.url || node.display_url),
       width: node.dimensions?.width || null,
       height: node.dimensions?.height || null,
+      previewUrl: pickPreview(resources, 'url')?.url || node.display_url,
+      dashManifest: isVideo ? asManifest(node.dash_info?.video_dash_manifest) : null,
       code: node.shortcode,
     };
   }
 
   const videoKey = FB_VIDEO_URL_KEYS.find(key => typeof node[key] === 'string' && node[key]);
   if (videoKey) {
-    return { type: 'video', url: node[videoKey], width: node.width || null, height: node.height || null };
+    return {
+      type: 'video',
+      url: node[videoKey],
+      width: node.width || null,
+      height: node.height || null,
+      previewUrl: node.preferred_thumbnail?.image?.uri || node.thumbnailImage?.uri || null,
+      dashManifest: asManifest(node.dash_manifest) || asManifest(node.manifest_xml) || asManifest(node.dash_manifests?.[0]?.manifest_xml),
+    };
   }
 
   if (node.__typename === 'Photo') {
-    const image = pickLargest(FB_PHOTO_IMAGE_KEYS.map(key => node[key]), 'uri');
-    if (image) return { type: 'image', url: image.uri, width: image.width || null, height: image.height || null };
+    const images = FB_PHOTO_IMAGE_KEYS.map(key => node[key]);
+    const image = pickLargest(images, 'uri');
+    if (image) {
+      return {
+        type: 'image',
+        url: image.uri,
+        width: image.width || null,
+        height: image.height || null,
+        previewUrl: pickPreview(images, 'uri')?.uri || null,
+      };
+    }
   }
 
   return null;
@@ -582,7 +650,14 @@ function collectMedia(root, ctx) {
       const key = mediaDedupeKey(media.url);
       if (isAllowedMediaUrl(media.url) && !ctx.seen.has(key)) {
         ctx.seen.add(key);
-        ctx.items.push({ type: media.type, url: media.url, width: media.width, height: media.height });
+        ctx.items.push({
+          type: media.type,
+          url: media.url,
+          width: media.width,
+          height: media.height,
+          previewUrl: media.previewUrl && isAllowedMediaUrl(media.previewUrl) ? media.previewUrl : null,
+          dashManifest: media.type === 'video' ? media.dashManifest || null : null,
+        });
         if (!ctx.code && media.code) ctx.code = media.code;
       }
       continue;
@@ -593,7 +668,7 @@ function collectMedia(root, ctx) {
   }
 }
 
-function extractMediaFromSource(source) {
+async function extractMediaFromSource(source) {
   const ctx = { items: [], seen: new Set(), code: null };
   if (typeof source !== 'string' || !source) return { prefix: 'media', items: [] };
 
@@ -606,6 +681,11 @@ function extractMediaFromSource(source) {
   }
   if (ctx.items.length === 0) {
     for (const blob of blobs) collectMedia(blob, ctx);
+  }
+
+  for (const item of ctx.items) {
+    if (item.dashManifest) item.dash = await resolveDashUpgrade(item, item.dashManifest);
+    delete item.dashManifest;
   }
 
   const prefix = ctx.code && MEDIA_SHORTCODE_PATTERN.test(ctx.code) ? ctx.code : 'media';
@@ -634,11 +714,217 @@ function buildMediaResponse(set, streams) {
     kind: 'media',
     token: storeMediaSet(set),
     prefix: set.prefix,
-    items: set.items.map((item, index) => ({ ...item, filename: buildMediaFilename(set.prefix, item, index) })),
+    items: set.items.map((item, index) => ({
+      type: item.type,
+      width: item.width,
+      height: item.height,
+      quality: item.dash ? item.dash.quality : null,
+      filename: buildMediaFilename(set.prefix, item, index),
+      hasPreview: !!item.previewUrl,
+    })),
     // DASH-only videos are not in the JSON payloads; keep the quality list as a fallback.
     streams: hasVideo ? [] : streams,
   };
 }
+
+function getMediaItemFromQuery(req, res) {
+  const { token, index } = req.query;
+  if (typeof token !== 'string' || !MEDIA_TOKEN_PATTERN.test(token) || typeof index !== 'string' || !/^\d{1,3}$/.test(index)) {
+    res.status(400).send('Invalid request');
+    return null;
+  }
+
+  const set = mediaStore.get(token);
+  if (!set || set.expiresAt <= Date.now()) {
+    res.status(404).send('ลิงก์หมดอายุ กรุณากด Show Download ใหม่');
+    return null;
+  }
+
+  const item = set.items[Number(index)];
+  if (!item) {
+    res.status(404).send('Not found');
+    return null;
+  }
+  return { set, item, index: Number(index) };
+}
+
+// Returns a readable for the best rendition; DASH items are merged and fall back to the progressive file.
+async function openMediaItem(item, signal) {
+  if (item.dash) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fbdl-'));
+    try {
+      const outPath = await mergeDashToFile(item.dash.videoUrl, item.dash.audioUrl, tmpDir);
+      return { stream: fs.createReadStream(outPath), tmpDir, contentType: 'video/mp4' };
+    } catch (err) {
+      cleanup(tmpDir);
+      console.error('DASH merge failed, using progressive file:', err.message);
+    }
+  }
+
+  const resp = await axios({
+    method: 'GET',
+    url: item.url,
+    responseType: 'stream',
+    timeout: 90000,
+    headers: FB_HEADERS,
+    proxy: false,
+    maxRedirects: 5,
+    beforeRedirect: assertAllowedRedirect,
+    signal,
+  });
+  const upstreamType = String(resp.headers['content-type'] || '');
+  return {
+    stream: resp.data,
+    tmpDir: null,
+    contentType: /^(image|video)\//i.test(upstreamType) ? upstreamType : (item.type === 'video' ? 'video/mp4' : 'image/jpeg'),
+  };
+}
+
+// Prefers HEAD; some CDN edges omit Content-Length there, so fall back to a 1-byte range GET.
+async function probeContentLength(url) {
+  const base = {
+    url,
+    timeout: 15000,
+    headers: { ...FB_HEADERS, 'Accept-Encoding': 'identity' },
+    proxy: false,
+    maxRedirects: 5,
+    beforeRedirect: assertAllowedRedirect,
+  };
+
+  try {
+    const head = await axios({ ...base, method: 'HEAD' });
+    const length = parseInt(head.headers['content-length'] || '', 10);
+    if (length > 0) return length;
+  } catch {}
+
+  try {
+    const ranged = await axios({
+      ...base,
+      method: 'GET',
+      headers: { ...base.headers, Range: 'bytes=0-0' },
+      responseType: 'stream',
+      validateStatus: status => status === 200 || status === 206,
+    });
+    ranged.data.destroy();
+    const total = parseInt((String(ranged.headers['content-range'] || '').match(/\/(\d+)$/) || [])[1] || '', 10);
+    return total > 0 ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+// Merged DASH size is the sum of both tracks; container overhead is negligible.
+async function getMediaItemSize(item) {
+  if (item.size !== undefined) return item.size;
+
+  let size;
+  if (item.dash) {
+    const [video, audio] = await Promise.all([probeContentLength(item.dash.videoUrl), probeContentLength(item.dash.audioUrl)]);
+    size = video && audio ? video + audio : null;
+  }
+  if (!size) size = await probeContentLength(item.url);
+
+  item.size = size || null;
+  return item.size;
+}
+
+app.get('/api/media/sizes', sizesLimiter, async (req, res) => {
+  const { token } = req.query;
+  if (typeof token !== 'string' || !MEDIA_TOKEN_PATTERN.test(token)) return res.status(400).json({ error: 'Invalid token' });
+
+  const set = mediaStore.get(token);
+  if (!set || set.expiresAt <= Date.now()) return res.status(404).json({ error: 'Expired' });
+
+  const sizes = new Array(set.items.length).fill(null);
+  let next = 0;
+  // Bounded concurrency so a 50-item set does not open 100 CDN connections at once.
+  const worker = async () => {
+    while (next < set.items.length) {
+      const index = next++;
+      sizes[index] = await getMediaItemSize(set.items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, set.items.length) }, worker));
+
+  res.json({ sizes });
+});
+
+app.get('/api/media/file', fileLimiter, async (req, res) => {
+  const found = getMediaItemFromQuery(req, res);
+  if (!found) return;
+  const { set, item, index } = found;
+
+  let opened;
+  try {
+    opened = await openMediaItem(item);
+  } catch (err) {
+    console.error('Media file error:', err.message);
+    return res.status(502).send('ดาวน์โหลดไม่สำเร็จ กรุณาลองใหม่');
+  }
+
+  const release = () => {
+    opened.stream.destroy();
+    if (opened.tmpDir) cleanup(opened.tmpDir);
+  };
+  // Client may have left while the merge was running.
+  if (res.destroyed || !res.socket || res.socket.destroyed) return release();
+
+  res.setHeader('Content-Type', opened.contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="${buildMediaFilename(set.prefix, item, index)}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.on('close', release);
+  opened.stream.on('error', () => res.destroy());
+  opened.stream.pipe(res);
+});
+
+// Proxies CDN media by token/index; IG/FB CDNs block cross-origin <img> hotlinking.
+app.get('/api/media/preview', previewLimiter, async (req, res) => {
+  const found = getMediaItemFromQuery(req, res);
+  if (!found) return;
+  const { item } = found;
+
+  const wantFull = req.query.full === '1';
+  const url = wantFull ? item.url : item.previewUrl;
+  if (!url) return res.status(404).send('No preview');
+
+  const headers = { ...FB_HEADERS, 'Accept-Encoding': 'identity' };
+  const range = req.headers.range;
+  if (wantFull && typeof range === 'string' && /^bytes=\d*-\d*$/.test(range)) headers.Range = range;
+
+  try {
+    const resp = await axios({
+      method: 'GET',
+      url,
+      responseType: 'stream',
+      timeout: 60000,
+      headers,
+      proxy: false,
+      maxRedirects: 5,
+      beforeRedirect: assertAllowedRedirect,
+      validateStatus: status => status === 200 || status === 206,
+    });
+
+    const contentType = String(resp.headers['content-type'] || '');
+    if (!/^(image|video)\//i.test(contentType)) {
+      resp.data.destroy();
+      return res.status(502).send('Unexpected content type');
+    }
+
+    res.status(resp.status);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    for (const name of ['content-length', 'content-range', 'accept-ranges']) {
+      if (resp.headers[name]) res.setHeader(name, resp.headers[name]);
+    }
+
+    res.on('close', () => resp.data.destroy());
+    resp.data.pipe(res);
+  } catch (err) {
+    console.error('Preview error:', err.message);
+    if (!res.headersSent) res.status(502).send('Preview failed');
+  }
+});
 
 app.get('/api/media/zip', zipLimiter, async (req, res) => {
   const { token } = req.query;
@@ -651,7 +937,11 @@ app.get('/api/media/zip', zipLimiter, async (req, res) => {
     return res.status(404).send('ลิงก์หมดอายุ กรุณากด Show Download ใหม่');
   }
 
-  const entries = set.items.map((item, index) => ({ name: buildMediaFilename(set.prefix, item, index), url: item.url }));
+  // Entries live under one folder so extracting the ZIP does not scatter files.
+  const entries = set.items.map((item, index) => ({
+    name: `${set.prefix}/${buildMediaFilename(set.prefix, item, index)}`,
+    item,
+  }));
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${set.prefix}.zip"`);
@@ -676,18 +966,9 @@ app.post('/api/merge', mergeLimiter, async (req, res) => {
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fbdl-'));
-  const videoPath = path.join(tmpDir, 'video.mp4');
-  const audioPath = path.join(tmpDir, 'audio.mp4');
-  const outPath = path.join(tmpDir, `out_${quality || 'video'}.mp4`);
 
   try {
-    await downloadFile(videoUrl, videoPath);
-    const args = audioUrl
-      ? ['-i', videoPath, '-i', audioPath, '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', outPath]
-      : ['-i', videoPath, '-c', 'copy', '-y', outPath];
-
-    if (audioUrl) await downloadFile(audioUrl, audioPath);
-    await runFfmpeg(args);
+    const outPath = await mergeDashToFile(videoUrl, audioUrl || null, tmpDir);
 
     const filename = `fb_video_${String(quality || 'video').replace(/[^a-z0-9]/gi, '_')}.mp4`;
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -742,11 +1023,24 @@ app.get('/api/download', downloadLimiter, async (req, res) => {
   }
 });
 
+const MEDIA_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024;
+
 function downloadFile(url, dest) {
   return new Promise(async (resolve, reject) => {
     try {
       const resp = await axios({ method: 'GET', url, responseType: 'stream', timeout: 90000, headers: FB_HEADERS, proxy: false, maxRedirects: 5, beforeRedirect: assertAllowedRedirect });
       const writer = fs.createWriteStream(dest);
+      let size = 0;
+      // axios does not enforce maxContentLength on streams.
+      resp.data.on('data', chunk => {
+        size += chunk.length;
+        if (size > MEDIA_MAX_DOWNLOAD_BYTES) {
+          resp.data.destroy();
+          writer.destroy();
+          reject(new Error('File size limit exceeded'));
+        }
+      });
+      resp.data.on('error', reject);
       resp.data.pipe(writer);
       writer.on('finish', resolve);
       writer.on('error', reject);
@@ -754,6 +1048,24 @@ function downloadFile(url, dest) {
       reject(err);
     }
   });
+}
+
+// Stream copy only: no re-encode, so output quality equals the source renditions.
+async function mergeDashToFile(videoUrl, audioUrl, tmpDir) {
+  const videoPath = path.join(tmpDir, 'video.mp4');
+  const audioPath = path.join(tmpDir, 'audio.mp4');
+  const outPath = path.join(tmpDir, 'merged.mp4');
+
+  await Promise.all([
+    downloadFile(videoUrl, videoPath),
+    audioUrl ? downloadFile(audioUrl, audioPath) : null,
+  ]);
+
+  const inputs = audioUrl
+    ? ['-i', videoPath, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0']
+    : ['-i', videoPath];
+  await runFfmpeg(['-hide_banner', '-loglevel', 'error', ...inputs, '-c', 'copy', '-movflags', '+faststart', '-y', outPath]);
+  return outPath;
 }
 
 const ZIP_MAX_ENTRY_BYTES = 500 * 1024 * 1024;
@@ -820,29 +1132,23 @@ async function streamZip(res, entries) {
     header.writeUInt16LE(name.length, 26);
     await write(Buffer.concat([header, name]));
 
-    const resp = await axios({
-      method: 'GET',
-      url: entry.url,
-      responseType: 'stream',
-      timeout: 90000,
-      headers: FB_HEADERS,
-      proxy: false,
-      maxRedirects: 5,
-      beforeRedirect: assertAllowedRedirect,
-      signal: controller.signal,
-    });
+    const opened = await openMediaItem(entry.item, controller.signal);
 
     let crc = 0;
     let size = 0;
-    for await (const chunk of resp.data) {
-      size += chunk.length;
-      total += chunk.length;
-      if (size > ZIP_MAX_ENTRY_BYTES || total > ZIP_MAX_TOTAL_BYTES) {
-        resp.data.destroy();
-        throw new Error('ZIP size limit exceeded');
+    try {
+      for await (const chunk of opened.stream) {
+        size += chunk.length;
+        total += chunk.length;
+        if (size > ZIP_MAX_ENTRY_BYTES || total > ZIP_MAX_TOTAL_BYTES) {
+          throw new Error('ZIP size limit exceeded');
+        }
+        crc = crc32(crc, chunk);
+        await write(chunk);
       }
-      crc = crc32(crc, chunk);
-      await write(chunk);
+    } finally {
+      opened.stream.destroy();
+      if (opened.tmpDir) cleanup(opened.tmpDir);
     }
 
     const descriptor = Buffer.alloc(16);
